@@ -1,0 +1,66 @@
+Type=Exe
+Reference=*\G{00020430-0000-0000-C000-000000000046}#2.0#0#..\..\..\..\..\..\WINDOWS\system32\stdole2.tlb#OLE Automation
+Reference=*\G{420B2830-E718-11CF-893D-00A0C9054228}#1.0#0#..\..\..\..\..\..\WINDOWS\system32\scrrun.dll#Microsoft Scripting Runtime
+Reference=*\G{AE2440AF-5DA2-4C7D-BDEC-18094FAD267A}#1.0#0#..\..\..\..\..\bin\VLMessaging.dll#VLMessaging
+Class=cMachineRouter; cMachineRouter.cls
+Form=fMouseEvents.frm
+Module=mMain; mMain.bas
+Class=cTP_AdvSysTray; ..\..\VB6Common\cTP_AdvSysTray.cls
+Class=cTP_EasyPopupMenu; ..\..\VB6Common\cTP_EasyPopupMenu.cls
+Module=mDB_Common; ..\..\VBVBACommon\mDB_Common.bas
+Module=mWinAPI_Common; ..\..\VBVBACommon\mWinAPI_Common.bas
+Module=mWinAPI_HResult; ..\..\VBVBACommon\mWinAPI_HResult.bas
+Module=mWinAPI_Variant; ..\..\VBVBACommon\mWinAPI_Variant.bas
+Module=mWinAPI_Windows; ..\..\VBVBACommon\mWinAPI_Windows.bas
+Module=mMachineRouterFinder; ..\Common\mMachineRouterFinder.bas
+Module=mTP_Trace; ..\..\VBVBACommon\mTP_Trace.bas
+Startup="Sub Main"
+HelpFile=""
+Title="VLMMachineRouter"
+ExeName32="VLMMR.exe"
+Path32="..\..\..\..\..\bin"
+Command32=""
+Name="VLMMachineRouter"
+HelpContextID="0"
+CompatibleMode="0"
+MajorVer=0
+MinorVer=0
+RevisionVer=113
+AutoIncrementVer=1
+ServerSupportFiles=0
+VersionCompanyName="Trading Room Associates Ltd"
+VersionLegalCopyright="Copyright (c) Trading Room Associates 2009-2012 - All rights reserved"
+VersionProductName="VLM Machine Router"
+CondComp="INCLUDE_TRACES = 0"
+CompilationType=0
+OptimizationType=0
+FavorPentiumPro(tm)=0
+CodeViewDebugInfo=0
+NoAliasing=0
+BoundsCheck=0
+OverflowCheck=0
+FlPointCheck=0
+FDIVCheck=0
+UnroundedFP=0
+StartMode=0
+Unattended=0
+Retained=0
+ThreadPerObject=0
+MaxNumberOfThreads=1
+DebugStartupOption=0
+
+[MS Transaction Server]
+AutoRefresh=1
+
+[vbAdvance]
+IsConsole=0
+HasStubFile=0
+GenerateMap=0
+TSAware=0
+XPManifest=0
+ResBuildName=..\..\..\bin\IDDirectory.dll
+ReplaceIcon=1
+SendCommandArgs=0
+SymbDbgPref=0
+RevisionVersion=0
+AppIconFile=..\Resources\app.ico

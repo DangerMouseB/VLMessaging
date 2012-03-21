@@ -1,8 +1,7 @@
 Attribute VB_Name = "mTesting"
 '*************************************************************************************************************************************************************************************************************************************************
-'            COPYRIGHT NOTICE
 '
-' Copyright (C) David Briant 2009 - All rights reserved
+' Copyright (c) David Briant 2009-2011 - All rights reserved
 '
 '*************************************************************************************************************************************************************************************************************************************************
 
@@ -17,9 +16,19 @@ Sub test1()
 End Sub
 
 Sub test2()
-    Dim fred As New VLWeakDictionary, a As New Collection, b As Collection
+    Dim fred As New VLMWeakDictionary, a As New Collection, b As Collection
     InitVBoost
     a.Add 1
     Set fred("a") = a
     Set b = fred("a")
 End Sub
+
+Sub exampleFindVLMMR()
+    Dim hVLMMR As Long, utils As New VLMUtils
+    hVLMMR = utils.MRHWnd("VLMMR.exe")
+    If hVLMMR = 0 Then Debug.Print "Couldn't find router": Exit Sub
+    Debug.Print "ClassName: " & utils.MRClassName()
+    Debug.Print "WindowName: " & utils.MRWindowName()
+End Sub
+
+

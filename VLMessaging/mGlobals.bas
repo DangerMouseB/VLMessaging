@@ -1,37 +1,27 @@
 Attribute VB_Name = "mGlobals"
 '*************************************************************************************************************************************************************************************************************************************************
-'            COPYRIGHT NOTICE
 '
-' Copyright (C) David Briant 2009 - All rights reserved
+' Copyright (c) David Briant 2009-2011 - All rights reserved
 '
 '*************************************************************************************************************************************************************************************************************************************************
-
-' TODO
-' expose asMessageArray and fromMessageArray on VLMessage
-' make VLAddress a public type - no behaviour
-
-
-
-
-
 
 Option Explicit
 
 ' error reporting
-Private Const MODULE_NAME As String = "Globals"
+Private Const MODULE_NAME As String = "mGlobals"
 Private Const MODULE_VERSION As String = "0.0.0.1"
 
 Public Const GLOBAL_PROJECT_NAME As String = "VLMessaging"
 Public Const SHOW_TRACE As Boolean = False
 
-Public Const VL_MESSAGING_CONNECTION_REQUEST As String = "VLConnectionRequest"
-Public Const VL_MESSAGING_CONNECTION_AGREED As String = "VLConnectionAgreed"
-Public Const VL_MESSAGING_AGREEMENT_ACKNOWLEDGED As String = "VLAgreementAcknowledged"
-Public Const VL_MESSAGING_DISCONNECT As String = "VLDisconnect"
+Public Const VL_MESSAGING_CONNECTION_REQUEST As String = "VLMConnectionRequest"
+Public Const VL_MESSAGING_CONNECTION_AGREED As String = "VLMConnectionAgreed"
+Public Const VL_MESSAGING_AGREEMENT_ACKNOWLEDGED As String = "VLMAgreementAcknowledged"
+Public Const VL_MESSAGING_DISCONNECT As String = "VLMDisconnect"
 
-Public Const VL_MESSAGING_MESSAGE_IN_TRANSIT As String = "VLMessageInTransit"
-Public Const VL_MESSAGING_MESSAGE_RECEIVED As String = "VLMessageReceived"
-Public Const VL_MESSAGING_MESSAGE_GARBLED As String = "VLMessageGarbled"
+Public Const VL_MESSAGING_MESSAGE_IN_TRANSIT As String = "VLMMessageInTransit"
+Public Const VL_MESSAGING_MESSAGE_RECEIVED As String = "VLMMessageReceived"
+Public Const VL_MESSAGING_MESSAGE_GARBLED As String = "VLMMessageGarbled"
 
 Public g_connectionRequestMessageID As Long
 Public g_connectionAgreedMessageID As Long
@@ -43,8 +33,8 @@ Public g_messageReceivedMessageID As Long
 Public g_messageGarbledMessageID As Long
 
 Private myWindowsClasses As New Dictionary
-Private myMMFileTransports As New VLWeakDictionary
-Private myMMFileListeners As New VLWeakDictionary
+Private myMMFileTransports As New VLMWeakDictionary
+Private myMMFileListeners As New VLMWeakDictionary
 Private myWindowsMessagesHaveBeenCreated As Boolean
 
 
@@ -114,25 +104,25 @@ End Sub
 ' Transport / Listener management
 '*************************************************************************************************************************************************************************************************************************************************
 
-Sub addMMFileTransport(hwnd As Long, MMFileTransport As VLMMFileTransport)
+Sub addMMFileTransport(hWnd As Long, MMFileTransport As VLMMMFileTransport)
     Const METHOD_NAME = "addMMFileTransport"
-    If myMMFileTransports.exists(CStr(hwnd)) Then DBErrors_raiseGeneralError ModuleSummary, METHOD_NAME, "hwnd already registered"
-    Set myMMFileTransports(CStr(hwnd)) = MMFileTransport
+    If myMMFileTransports.exists(CStr(hWnd)) Then DBErrors_raiseGeneralError ModuleSummary, METHOD_NAME, "hwnd already registered"
+    Set myMMFileTransports(CStr(hWnd)) = MMFileTransport
 End Sub
 
-Sub removeMMFileTransport(hwnd As Long)
+Sub removeMMFileTransport(hWnd As Long)
     Const METHOD_NAME = "removeMMFileTransport"
-    If myMMFileTransports.exists(CStr(hwnd)) Then myMMFileTransports.remove CStr(hwnd)
+    If myMMFileTransports.exists(CStr(hWnd)) Then myMMFileTransports.remove CStr(hWnd)
 End Sub
 
-Sub addMMFileListener(hwnd As Long, MMFileListener As VLMMFileListener)
+Sub addMMFileListener(hWnd As Long, MMFileListener As VLMMMFileListener)
     Const METHOD_NAME = "addMMFileListener"
-    If myMMFileListeners.exists(CStr(hwnd)) Then DBErrors_raiseGeneralError ModuleSummary, METHOD_NAME, "hwnd already registered"
-    Set myMMFileListeners(CStr(hwnd)) = MMFileListener
+    If myMMFileListeners.exists(CStr(hWnd)) Then DBErrors_raiseGeneralError ModuleSummary, METHOD_NAME, "hwnd already registered"
+    Set myMMFileListeners(CStr(hWnd)) = MMFileListener
 End Sub
 
-Sub removeMMFileListener(hwnd As Long)
-    myMMFileListeners.remove CStr(hwnd)
+Sub removeMMFileListener(hWnd As Long)
+    myMMFileListeners.remove CStr(hWnd)
 End Sub
 
 
@@ -140,37 +130,37 @@ End Sub
 ' Window Procedure
 '*************************************************************************************************************************************************************************************************************************************************
 
-Function VLMessaging_WndProc(ByVal hwnd As Long, ByVal lMsg As Long, ByVal wparam As Long, ByVal lparam As Long) As Long
-    Dim MMFileListener As VLMMFileListener, MMFileTransport As VLMMFileTransport
+Function VLMessaging_WndProc(ByVal hWnd As Long, ByVal lMsg As Long, ByVal wparam As Long, ByVal lparam As Long) As Long
+    Dim MMFileListener As VLMMMFileListener, MMFileTransport As VLMMMFileTransport
 
     VLMessaging_WndProc = 0  ' Success
     
     Select Case lMsg
     
         Case WM_TIMER
-            If myMMFileListeners.exists(CStr(hwnd)) Then
-                Set MMFileListener = myMMFileListeners(CStr(hwnd))
+            If myMMFileListeners.exists(CStr(hWnd)) Then
+                Set MMFileListener = myMMFileListeners(CStr(hWnd))
                 MMFileListener.processWinProc lMsg, wparam, lparam
             End If
-            If myMMFileTransports.exists(CStr(hwnd)) Then
-                Set MMFileTransport = myMMFileTransports(CStr(hwnd))
+            If myMMFileTransports.exists(CStr(hWnd)) Then
+                Set MMFileTransport = myMMFileTransports(CStr(hWnd))
                 MMFileTransport.processWinProc lMsg, wparam, lparam
             End If
 
         Case g_connectionRequestMessageID
-            If myMMFileListeners.exists(CStr(hwnd)) Then
-                Set MMFileListener = myMMFileListeners(CStr(hwnd))
+            If myMMFileListeners.exists(CStr(hWnd)) Then
+                Set MMFileListener = myMMFileListeners(CStr(hWnd))
                 MMFileListener.processWinProc lMsg, wparam, lparam
             End If
         
         Case g_connectionAgreedMessageID, g_agreementAcknowledgedMessageID, g_connectionDisconnectMessageID, g_messageInTransitID, g_messageReceivedMessageID, g_messageGarbledMessageID
-            If myMMFileTransports.exists(CStr(hwnd)) Then
-                Set MMFileTransport = myMMFileTransports(CStr(hwnd))
+            If myMMFileTransports.exists(CStr(hWnd)) Then
+                Set MMFileTransport = myMMFileTransports(CStr(hWnd))
                 MMFileTransport.processWinProc lMsg, wparam, lparam
             End If
             
         Case Else
-            VLMessaging_WndProc = apiDefWindowProcA(hwnd, lMsg, wparam, lparam)            ' Return whatever the default window procedure returns.
+            VLMessaging_WndProc = apiDefWindowProcA(hWnd, lMsg, wparam, lparam)            ' Return whatever the default window procedure returns.
             
     End Select
     
