@@ -26,7 +26,7 @@ class AddOneQueuingDaemon:
         if msg.subject == 'ADD_ONE_TO_CURRENT':
             current = Missing
             while not current:
-                current = await self.conn.send(Msg(self.conn._addr, 'GET_CURRENT', Missing), 200)
+                current = await self.conn.send(Msg(self.conn.addr, 'GET_CURRENT', Missing), 200)
             await self.conn.send( msg.reply('ADD_ONE_TO_CURRENT_REPLY', current.contents + 1) )
 
         elif msg.subject == 'GET_CURRENT':
@@ -48,13 +48,13 @@ def test_add_one_to_current():
         router = Router()
         daemon = AddOneQueuingDaemon(router)
         conn = daemon.conn
-        result1 = await conn.send(Msg(conn._addr, 'GET_FRED', None), 5000)
+        result1 = await conn.send(Msg(conn.addr, 'GET_FRED', None), 5000)
         if result1:
             printMsg(f'Got', f'{result1.subject} = {result1.contents}')
         else:
             print('Timedout waiting for a result')
 
-        result2 = await conn.send(Msg(conn._addr, 'ADD_ONE_TO_CURRENT', None), 5000)
+        result2 = await conn.send(Msg(conn.addr, 'ADD_ONE_TO_CURRENT', None), 5000)
 
         if result2:
             printMsg(f'Got', f'{result2.subject} = {result2.contents}')

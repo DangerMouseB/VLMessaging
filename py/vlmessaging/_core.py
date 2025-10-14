@@ -78,9 +78,10 @@ REGISTER_SERVICE = 'REGISTER_SERVICE'
 REGISTER_SERVICE_REPLY = 'REGISTER_SERVICE_REPLY'
 UNREGISTER_SERVICE = 'UNREGISTER_SERVICE'
 UNREGISTER_SERVICE_REPLY = 'UNREGISTER_SERVICE_REPLY'
-SERVICE_NOT_LISTENING = 'ENTRY_NOT_LISTENING'
+SERVICE_NOT_LISTENING = 'SERVICE_NOT_LISTENING'
 GET_SERVICES = 'GET_SERVICES'
 GET_SERVICES_REPLY = 'GET_SERVICES_REPLY'
+
 HEARTBEAT = 'HEARTBEAT'
 HEARTBEAT_REPLY = 'HEARTBEAT_REPLY'
 
@@ -91,9 +92,10 @@ CLOSING_AGENT = 'CLOSING_AGENT'
 UNKNOWN_SUBJECT = 'UNKNOWN_SUBJECT'
 
 
+
 class Connection:
 
-    __slots__ = ('_router', '_msgArrivedFn', '_inbox', '_futureByReplyId', '_msgIdSeed', '_addr')
+    __slots__ = ('_router', '_msgArrivedFn', '_inbox', '_futureByReplyId', '_msgIdSeed', 'addr')
 
     def __init__(self, router, connectionId, fn):
         self._router = router
@@ -101,7 +103,7 @@ class Connection:
         self._inbox = asyncio.Queue()
         self._futureByReplyId = {}
         self._msgIdSeed = itertools.count(1)
-        self._addr = Addr(Missing, connectionId)
+        self.addr = Addr(Missing, connectionId)
 
     async def _deliver(self, msg):
         if (fut := self._futureByReplyId.pop(msg._replyId, Missing)) is Missing:
@@ -121,7 +123,7 @@ class Connection:
     async def send(self, msg, timeout=Missing):
         # return reply, Missing if timeout exceeded or None if no timeout
         msg._msgId = next(self._msgIdSeed)
-        msg.fromAddr = self._addr
+        msg.fromAddr = self.addr
         if timeout:
             # semi-sync send - wait for reply or timeout
             loop = asyncio.get_running_loop()
