@@ -10,10 +10,9 @@
 import collections
 
 
-Addr = collections.namedtuple('Addr', ('socketAddr', 'connId'))
+Addr = collections.namedtuple('Addr', ('routerId', 'connectionId'))
 
 Entry = collections.namedtuple('Entry', ('addr', 'service', 'params'))
-
 
 class Msg:
     __slots__ = ('fromAddr', 'toAddr', 'subject', '_msgId', '_replyId', 'contents', 'meta')
@@ -29,3 +28,5 @@ class Msg:
         answer = Msg(self.fromAddr, subject, contents)
         answer._replyId = self._msgId
         return answer
+    def __repr__(self):
+        return f'Msg({self.fromAddr!r} -> {self.toAddr!r} "{self.subject!s}" msgId: {self._msgId}, replyId: {self._replyId})'

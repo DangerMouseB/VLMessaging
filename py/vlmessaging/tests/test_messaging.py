@@ -10,7 +10,7 @@
 from coppertop.utils import Missing
 
 import vlmessaging as vlm
-from vlmessaging import Msg, Addr, Entry, LOCAL_DIRECTORY, REGISTER_SERVICE, HEARTBEAT, HEARTBEAT_REPLY, GET_ENTRIES
+from vlmessaging import Msg, Addr, Entry, LOCAL_DIRECTORY, REGISTER_SERVICE, HEARTBEAT, HEARTBEAT_REPLY, GET_SERVICES
 from vlmessaging._core import _msgFromBytes, _msgAsBytes
 
 
