@@ -9,13 +9,16 @@
 
 import collections
 
-
+# OPEN: if we route via a single inter-machine router then we will need a machineId in Addr
 Addr = collections.namedtuple('Addr', ('routerId', 'connectionId'))
+Addr.__str__ = lambda self: f'<{self.routerId}:{self.connectionId}>'
 
 Entry = collections.namedtuple('Entry', ('addr', 'service', 'params'))
 
 class Msg:
+
     __slots__ = ('fromAddr', 'toAddr', 'subject', '_msgId', '_replyId', 'contents', 'meta')
+
     def __init__(self, toAddr, subject, contents):
         self.fromAddr = None
         self.toAddr = toAddr
@@ -24,9 +27,11 @@ class Msg:
         self._replyId = None
         self.contents = contents
         self.meta = {}
+
     def reply(self, subject, contents):
         answer = Msg(self.fromAddr, subject, contents)
         answer._replyId = self._msgId
         return answer
+
     def __repr__(self):
-        return f'Msg({self.fromAddr!r} -> {self.toAddr!r} "{self.subject!s}" msgId: {self._msgId}, replyId: {self._replyId})'
+        return f'Msg({self.fromAddr!s} -> {self.toAddr!s} "{self.subject!s}" msgId: {self._msgId}, replyId: {self._replyId})'

@@ -49,7 +49,7 @@
 
 
 # Python imports
-import itertools, io, logging, pynng, asyncio
+import itertools, io, logging, pynng, asyncio, weakref
 from amazon.ion import simpleion
 
 # coppertop imports
@@ -71,6 +71,8 @@ DIRECTORY_CONNECTION_ID = 1
 _SERVICE_ADDR_PREFIX = "ipc:///tmp/service_"
 DIRECTORY_CHECK_INTERVAL = 5000  # seconds
 
+LOCAL = None
+
 addr = "tcp://127.0.0.1:13134"
 
 INVALID_ADDRESS = 'INVALID_ADDRESS'
@@ -90,20 +92,20 @@ GET_AGENT_ID_REPLY = 'GET_AGENT_ID_REPLY'
 CLOSING_AGENT = 'CLOSING_AGENT'
 
 UNKNOWN_SUBJECT = 'UNKNOWN_SUBJECT'
+UNDELIVERABLE = 'UNDELIVERABLE'
 
 
 
 class Connection:
 
-    __slots__ = ('_router', '_msgArrivedFn', '_inbox', '_futureByReplyId', '_msgIdSeed', 'addr')
+    __slots__ = ('_router', '_msgArrivedFn', '_futureByReplyId', '_msgIdSeed', 'addr', '__weakref__')
 
     def __init__(self, router, connectionId, fn):
         self._router = router
         self._msgArrivedFn = fn
-        self._inbox = asyncio.Queue()
         self._futureByReplyId = {}
         self._msgIdSeed = itertools.count(1)
-        self.addr = Addr(Missing, connectionId)
+        self.addr = Addr(LOCAL, connectionId)
 
     async def _deliver(self, msg):
         if (fut := self._futureByReplyId.pop(msg._replyId, Missing)) is Missing:
@@ -130,7 +132,7 @@ class Connection:
             fut = loop.create_future()
             self._futureByReplyId[msg._msgId] = fut
             printMsg(f'send({timeout})', msg)
-            asyncio.create_task(self._router._route(msg))
+            self._router._route(msg)
             try:
                 reply = await asyncio.wait_for(fut, timeout / 1000)
             except asyncio.TimeoutError:
@@ -141,8 +143,16 @@ class Connection:
         else:
             # async send
             printMsg('send', msg)
-            asyncio.create_task(self._router._route(msg))
+            self._router._route(msg)
             return None
+
+    def __del__(self):
+        # clean up any pending futures
+        for fut in self._futureByReplyId.values():
+            if not fut.done():
+                fut.set_result(Missing)
+        # tell router
+        self._router._dropInboxFor(self.addr.connectionId)
 
 
 class Router:
@@ -151,7 +161,8 @@ class Router:
         '_sDirectoryListener', '_sDirectory',                           # local directory connections
         '_sLocalPeerListener', '_localPipeByAddr', '_sLocalByAddr',     # local peer connections
         '_sRemotePeerListener', '_remotePipeByAddr', '_sRemoteByAddr',  # remote peer connections
-        '_connectionsById', '_connectionIdSeed',
+        '_connectionById', '_inboxById',
+        '_connectionIdSeed', '_refreshInboxTasks',
         '_entries'
     )
 
@@ -159,37 +170,72 @@ class Router:
         self._sDirectoryListener, self._sDirectory = Missing, Missing
         self._sLocalPeerListener, self._localPipeByAddr, self._sLocalByAddr = Missing, {}, {}
         self._sRemotePeerListener, self._remotePipeByAddr, self._sRemoteByAddr = Missing, {}, Missing
-        self._connectionsById, self._connectionIdSeed = {}, itertools.count(1)
+        self._connectionById , self._inboxById = weakref.WeakValueDictionary(), {}
+        self._connectionIdSeed, self._refreshInboxTasks = itertools.count(1), False
         self._entries = {}
-        asyncio.create_task(self.start())
+        asyncio.create_task(self._processInboxes())
 
     def newConnection(self, fn):
         connectionId = next(self._connectionIdSeed)
         c = Connection(self, connectionId, fn)
-        self._connectionsById[connectionId] = c
+        self._connectionById[connectionId] = c
+        self._inboxById[connectionId] = asyncio.Queue()
+        self._refreshInboxTasks = True
         return c
 
-    async def _route(self, msg):
-        printMsg(f'route', msg._msgId)
-        self._connectionsById[msg.toAddr.connectionId]._inbox.put_nowait(msg)
+    def _dropInboxFor(self, connectionId):
+        self._inboxById.pop(connectionId, None)
+        self._refreshInboxTasks = True
 
-    async def start(self):
-        connIdByTask = {}
-        while True:
-            if len(connIdByTask) != len(self._connectionsById):
-                for connectionId, conn in self._connectionsById.items():
-                    if connectionId not in connIdByTask.values():
-                        connIdByTask[asyncio.create_task(conn._inbox.get())] = connectionId
-            if connIdByTask:
-                done, pending = await asyncio.wait(connIdByTask.keys(), return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    connectionId = connIdByTask.pop(task)
-                    msg = task.result()
-                    if (conn := self._connectionsById.get(connectionId, Missing)) is not Missing:
-                        asyncio.create_task(conn._deliver(msg))
-                        # Immediately start a new task for this connection
-                        connIdByTask[asyncio.create_task(conn._inbox.get())] = connectionId
+    def _route(self, msg):
+        routerId, cid = msg.toAddr
+        if routerId == LOCAL:
+            conn = self._connectionById.get(cid, Missing)
+            if conn:
+                printMsg(f'route', msg._msgId)
+                self._inboxById[cid].put_nowait(msg)
             else:
+                if msg.subject == UNDELIVERABLE:
+                    # don't get into a loop of undeliverable messages
+                    pass
+                else:
+                    reply = msg.reply(UNDELIVERABLE, msg.toAddr)
+                    connAndInbox = self._connectionAndInboxById.get(reply.toAddr.connectionId, Missing)
+                    if connAndInbox:
+                        printMsg(f'unroutable', msg._msgId)
+                        connAndInbox[1].put_nowait(reply)
+        else:
+            raise NotYetImplemented('inter-router routing')
+
+    async def _processInboxes(self):
+        # We keep a list of tasks waiting for messages to arrive in each connection's inbox. To prevent starvation we
+        # schedule them fairly by moving a connection's task that has just been processed to the end of the list thus
+        # silent connections bubble to the front. This is mildly wasteful since silent tasks need to be checked each
+        # loop but does ensure that busy connections don't dominate.
+        tasks = {}
+        while True:
+            if self._connectionById:
+                if self._refreshInboxTasks:
+                    # drop any tasks for closed connections
+                    tasks = {t: cid for t, cid in tasks.items() if cid in self._connectionById}
+                    # add any new connections
+                    for cid, conn in self._connectionById.items():
+                        if cid not in tasks.values():
+                            tasks[asyncio.create_task(self._inboxById[cid].get())] = cid
+                    self._refreshInboxTasks = False
+                # wait for one of the tasks to complete
+                done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    # pull the done task from the queue
+                    connectionId = tasks.pop(task)
+                    msg = task.result()
+                    if (conn := self._connectionById.get(connectionId, Missing)) is not Missing:
+                        inbox = self._inboxById[connectionId]
+                        asyncio.create_task(conn._deliver(msg))
+                        # add a new task for this connection to the end of the queue
+                        tasks[asyncio.create_task(inbox.get())] = connectionId
+            else:
+                #  sleep briefly and try again
                 await asyncio.sleep(0)
 
     async def tryStartDirectory(self):
@@ -294,12 +340,6 @@ class Router:
             for pipe in sock.pipes:
                 await pipe.asend(stuff.encode())
 
-    def newConnection(self, msgArrivedFn) -> Connection:
-        connId = next(self._connectionIdSeed)
-        answer = Connection(self, connId, msgArrivedFn)
-        self._connectionsById[connId] = answer
-        return answer
-
     def _send(self, msg, timeout=Missing) -> Msg | Missing:
         # if timeout is Missing send asynchronously
         if msg.toAddr == PUB:
@@ -318,14 +358,14 @@ class Router:
 def _msgAsBytes(msg):
     bytes = io.BytesIO()
     simpleion.dump('1', bytes, binary=True)
-    simpleion.dump(msg.fromAddr.socketAddr, bytes, binary=True)
-    simpleion.dump(msg.fromAddr.connId, bytes, binary=True)
+    simpleion.dump(msg.fromAddr.routerId, bytes, binary=True)
+    simpleion.dump(msg.fromAddr.connectionId, bytes, binary=True)
     if msg.toAddr == PUB:
         simpleion.dump(None, bytes, binary=True)
         simpleion.dump(None, bytes, binary=True)
     else:
-        simpleion.dump(msg.toAddr.socketAddr, bytes, binary=True)
-        simpleion.dump(msg.toAddr.connId, bytes, binary=True)
+        simpleion.dump(msg.toAddr.routerId, bytes, binary=True)
+        simpleion.dump(msg.toAddr.connectionId, bytes, binary=True)
     simpleion.dump(msg.subject, bytes, binary=True)
     simpleion.dump(msg._msgId, bytes, binary=True)
     simpleion.dump(msg._replyId, bytes, binary=True)
