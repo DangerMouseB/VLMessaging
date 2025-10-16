@@ -7,17 +7,17 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
-from coppertop.utils import Missing
+# Python imports
+import asyncio
 
-import vlmessaging as vlm
-from vlmessaging import Msg, Addr, Entry, LOCAL_DIRECTORY, REGISTER_SERVICE, HEARTBEAT, HEARTBEAT_REPLY, GET_SERVICES
+# local imports
+from vlmessaging import Msg, Addr, Router, VLM
 from vlmessaging._core import _msgFromBytes, _msgAsBytes
 
 
-
-def test_msg():
-    msg = Msg(Addr('local', 1), 'TEST', dict(hello='world'))
-    msg.fromAddr = Addr('local', 2)
+def test_serialise():
+    msg = Msg(Addr(VLM.DIRECTORY), 'TEST', dict(hello='world'))
+    msg.fromAddr = Addr(VLM.LOCAL, VLM.DIRECTORY_CONNECTION_ID)
     msg._msgId = 1
     bytes = _msgAsBytes(msg)
     msg2 = _msgFromBytes(bytes)
@@ -30,53 +30,49 @@ def test_msg():
     assert msg._replyId == msg2._replyId
 
 
+def test_messaging():
 
-class AddOneDaemon:
-    __slots__ = ('conn')
-    def __init__(self, conn):
-        self.conn = conn
-        conn.handler = self.msgArrived
-    def register(self):
-        self.conn.send(Msg(LOCAL_DIRECTORY, REGISTER_SERVICE, Entry(self.conn.addr, 'ADD_ONE', None)))
-    def msgArrived(self, msg):
-        if msg.subject == 'ADD_ONE':
-            answer = msg.contents + 1
-            reply = msg.reply('ADD_ONE_REPLY', answer)
-            self.conn.send(reply)
-        elif msg.subject == HEARTBEAT:
-            reply = msg.reply(HEARTBEAT_REPLY, None)
-            self.conn.send(reply)
+    # test that sending to a non-existent connection returns MSG_NOT_DELIVERED
+    # test that unawaited sending to a connection with no handler returns MSG_NOT_DELIVERED
+    # test that awaited sending to a connection with no handler gets handled as a reply
+    # test that dropped connections are cleaned up properly
+    # test VLM.IGNORE_UNHANDLED_REPLIES
+    # test VLM.HANDLE_DOES_NOT_UNDERSTAND
 
+    # msg = Msg(toAddr, "FRED", None)
+    # res = await conn.send(msg, 5000)
 
+    async def run_add_one_test():
+        router = Router()
+        x1 = router.newConnection()
+        x2 = router.newConnection(lambda m: None)
 
-def test_addOne():
-    router = vlm.Router()
-    daemon = AddOneDaemon(router.newConnection())
-    daemon.register()
+        result1 = await conn.send(Msg(conn.addr, 'GET_FRED', None), 5000)
+        if result1:
+            _PPMsg(f'Got', f'{result1.subject} = {result1.contents}')
+        else:
+            print('Timedout waiting for a result')
+        x1 = x2 = None
 
-    conn = router.newConnection()
+        result2 = await conn.send(Msg(conn.addr, 'ADD_ONE_TO_CURRENT', None), 5000)
 
-    # find the AddOneDaemon
-    msg = Msg(Addr(router.socketAddr, daemon.conn.connectionId), GET_ENTRIES, None)
-    reply = conn.send(msg, 1000)
-    assert reply
-    addOneAddr = Missing
-    for addr, service, params in reply.contents:
-        if service == 'ADD_ONE':
-            addOneAddr = addr
-            break
-    assert addOneAddr
+        if result2:
+            _PPMsg(f'Got', f'{result2.subject} = {result2.contents}')
+        else:
+            print('Timedout waiting for a result')
 
-    # get the daemon to add one
-    msg = Msg(addOneAddr, 'ADD_ONE', 1)
-    reply = conn.sendMsg(msg, 1000)
-    assert reply.contents == 2
+        await router.shutdown()
 
+        return f'{result1.subject} = {result1.contents}', result2.contents
+
+    result1, result2 = asyncio.run(run_add_one_test())
+    assert result1 == 'DOES_NOT_UNDERSTAND = GET_FRED'
+    assert result2 == 42
 
 
 def main():
-    test_msg()
-    test_addOne()
+    test_serialise()
+    # test_messaging() - wip
     print('passed')
 
 

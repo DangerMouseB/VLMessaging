@@ -7,9 +7,11 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
+# Python imports
 import collections
 
-# OPEN: if we route via a single inter-machine router then we will need a machineId in Addr
+
+# OPEN: if we route via a single inter-machine router then we will need a machineId in Addr - maybe added sooner than later?
 Addr = collections.namedtuple('Addr', ('routerId', 'connectionId'))
 Addr.__str__ = lambda self: f'<{self.routerId}:{self.connectionId}>'
 
