@@ -15,10 +15,10 @@ from coppertop.utils import Missing
 
 # local imports
 from vlmessaging import Msg, Router, Entry, Directory, VLM
-from vlmessaging.utils import _findSingleEntryOfTypeOrExit, _PPMsg
+from vlmessaging.utils import _findSingleEntryOfTypeOrExit, _PPMsg, with_async_init
 
 
-
+@with_async_init
 class GetCurrentAgent:
 
     __slots__ = ('conn', 'wait')
@@ -27,11 +27,9 @@ class GetCurrentAgent:
     GET_CURRENT = 'GET_CURRENT'
     GET_CURRENT_REPLY = 'GET_CURRENT_REPLY'
 
-    def __init__(self, router, wait):
+    async def __init__(self, router, wait):
         self.conn = router.newConnection(self.msgArrived)
         self.wait = wait
-
-    async def register(self):
         entryAdded = False
         while not entryAdded:
             msg = Msg(VLM.DIRECTORY, VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None))
@@ -49,7 +47,7 @@ class GetCurrentAgent:
             return [VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
 
 
-
+@with_async_init
 class AddOneToCurrentAgent:
 
     __slots__ = ('conn', 'addrOfGetCurrentAgent')
@@ -58,12 +56,9 @@ class AddOneToCurrentAgent:
     ADD_ONE_TO_CURRENT = 'ADD_ONE_TO_CURRENT'
     ADD_ONE_TO_CURRENT_REPLY = 'ADD_ONE_TO_CURRENT_REPLY'
 
-    def __init__(self, router):
+    async def __init__(self, router):
         self.conn = router.newConnection(self.msgArrived)
         self.addrOfGetCurrentAgent = Missing
-
-
-    async def register(self):
         entryAdded = False
         while not entryAdded:
             msg = Msg(VLM.DIRECTORY, VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None))
@@ -98,10 +93,8 @@ def test_add_one_to_current():
     async def run_add_one_test():
         router = Router()
         directory = Directory(router, VLM.LOCAL)
-        addOneAgent = AddOneToCurrentAgent(router)
-        await addOneAgent.register()
-        getCurrentAgent = GetCurrentAgent(router, 500)
-        await getCurrentAgent.register()
+        addOneAgent = await AddOneToCurrentAgent(router)
+        getCurrentAgent = await GetCurrentAgent(router, 500)
         conn = router.newConnection()
 
         # check that AddOneToCurrentAgent can find GetCurrentAgent and get a reply eventually
@@ -116,8 +109,7 @@ def test_add_one_to_current():
         await asyncio.sleep(0.01)
 
         # start a new GetCurrentAgent
-        getCurrentAgent = GetCurrentAgent(router, 0)
-        await getCurrentAgent.register()
+        getCurrentAgent = await GetCurrentAgent(router, 0)
 
         # test resilience of AddOneToCurrentAgent
         toAddr = addOneAgent.conn.addr          # ditto
