@@ -48,6 +48,13 @@
 
 
 
+# OPEN: to implement
+# allow a synchronous message to just wait for certain subjects so others can be handled by the message handler
+# e.g. reply = await conn.send(msg, timeout=5000, subjects=[self.ADD_ONE_TO_CURRENT_REPLY])
+# this allows the network to be setup / repaired in the background while waiting for a specific reply
+
+
+
 # Python imports
 import itertools, io, logging, pynng, asyncio, weakref
 from amazon.ion import simpleion
@@ -111,9 +118,13 @@ class Connection:
                 except ExitMessageHandler as ex:
                     pass
             else:
-                # no handler so reply it wasn't delivered
-                _PPMsg(f'undeliverable', msg._msgId)
-                await self.send(msg.reply(VLM.MSG_NOT_DELIVERED, msg.toAddr))
+                if msg.subject == VLM.MSG_NOT_DELIVERED:
+                    # don't get into a loop of undeliverable messages
+                    pass
+                else:
+                    # no handler so reply it wasn't delivered
+                    _PPMsg(f'undeliverable', msg._msgId)
+                    await self.send(msg.reply(VLM.MSG_NOT_DELIVERED, msg.toAddr))
         else:
             # we have a future waiting for this reply
             if fut.done():
@@ -138,7 +149,7 @@ class Connection:
     #             raise NotYetImplemented()
     #         raise NotYetImplemented()
 
-    async def send(self, msg, timeout=Missing):
+    async def send(self, msg, timeout=Missing, subjects=Missing):
         # return reply, Missing if timeout exceeded or None if no timeout
         msg._msgId = next(self._msgIdSeed)
         msg.fromAddr = self.addr
@@ -397,7 +408,44 @@ class Router:
 # Directory
 # **********************************************************************************************************************
 
+# one master directory per machine the one that successfully listened, others are slave - network mode is peer (like DNS?)
+# if the master closes or dies another can take over (slaves should ask the mast for current state on connection, and
+# upload their own entries too). For now, our topology is all or nothing - no entitlements / permissioning but we need
+# to design authentication in from the ground up. I.e. although everyone will be able to see all public services on the
+# network only authorised agents will be able to use them. DoS will not be preventable. Services may also be local,  or
+# machine wide too and not visible.
+
+# Addressing - machineId, routerId, connectionId
+#  connectionID is assigned by the router , -1 for the directory
+#  routerID is a random number not in use in the IPC address
+#  sending a message to the local directory os the way to get entries - relying on directories to sync themselves
+
+# this could be put into the normal internet style? fred.com/router345/connection23 and use regular DNS for netowrk
+# topology? The difference is that we add use p2p connections and resourse
+
+# to send a message locally is simple - just cross thread
+# to send a message to another process, the router must know if that process is IPC or TCP based
+# if connection doesn't exist then connect to other router
+# thus initially the network will be a star of stars to start with - with peer connections being created on demand
+
+# PUBSUB
+# we can use the pubsub socket to simplify things
+# any service that wants to publish will start a pub socket which will be in the entry - do we keep an IPC pub and a
+# TCP pub?
+
+
+
+
+
 class Directory:
+    '''
+    The Directory is the place where agents can advertise services they provide. It can be configured to:
+    - act alone (LOCAL mode) without cooperation with other directories,
+    - in cooperation with other Directories on a local machine (MACHINE mode),
+    - or with other Directores accessible on the netweork (NETWORK mode).
+
+    Agents can register and unregister their services here, and connections can query for available services.
+    '''
 
     __slots__ = ('_conn', '_entries')
 

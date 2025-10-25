@@ -25,7 +25,7 @@ async def _findEntriesOfTypeOrExit(connection, entryType, timeout, errMsg):
     else:
         return res.contents
 
-async def _findSingleEntryOfTypeOrExit(connection, entryType, timeout, errMsg):
+async def _findSingleEntryAddrOfTypeOrExit(connection, entryType, timeout, errMsg):
     res = await connection.send(Msg(VLM.DIRECTORY, VLM.GET_ENTRIES, entryType), timeout)
     if res is Missing:
         if errMsg: await connection.send(errMsg)

@@ -15,33 +15,42 @@ from coppertop.utils import Missing
 
 # local imports
 from vlmessaging import Msg, Router, Entry, Directory, VLM
-from vlmessaging.utils import _findSingleEntryOfTypeOrExit, _PPMsg, with_async_init
+from vlmessaging.utils import _findSingleEntryAddrOfTypeOrExit, _PPMsg, with_async_init
 
 
 @with_async_init
 class GetCurrentAgent:
 
-    __slots__ = ('conn', 'wait')
+    __slots__ = ('conn', 'wait', 'running')
 
     ENTRY_TYPE = 'GetCurrentAgent'
     GET_CURRENT = 'GET_CURRENT'
     GET_CURRENT_REPLY = 'GET_CURRENT_REPLY'
+    KILL = 'KILL'
+    KILL_REPLY = 'KILL_REPLY'
 
     async def __init__(self, router, wait):
         self.conn = router.newConnection(self.msgArrived)
         self.wait = wait
         entryAdded = False
+        self.running = True
         while not entryAdded:
             msg = Msg(VLM.DIRECTORY, VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None))
             entryAdded = await self.conn.send(msg, 1000)
             if entryAdded: entryAdded = entryAdded.contents
 
     async def msgArrived(self, msg):
+        if not self.running: return
 
         if msg.subject == self.GET_CURRENT:
             await asyncio.sleep(self.wait / 1000)
             self.wait = max(0, self.wait - 100)
             await self.conn.send( msg.reply(self.GET_CURRENT_REPLY, 41) )
+
+        if msg.subject == self.KILL:
+            self.running = False
+            await self.conn.send( msg.reply(self.KILL_REPLY, None) )
+            self.conn = None
 
         else:
             return [VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
@@ -73,7 +82,7 @@ class AddOneToCurrentAgent:
             current = Missing
             while not current:
                 if self.addrOfGetCurrentAgent is Missing:
-                    self.addrOfGetCurrentAgent = await _findSingleEntryOfTypeOrExit(self.conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg)
+                    self.addrOfGetCurrentAgent = await _findSingleEntryAddrOfTypeOrExit(self.conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg)
                 current = await self.conn.send(Msg(self.addrOfGetCurrentAgent, GetCurrentAgent.GET_CURRENT, Missing), 200)
             reply = msg.reply(self.ADD_ONE_TO_CURRENT_REPLY, current.contents + 1)
             await self.conn.send(reply)
@@ -90,38 +99,66 @@ class AddOneToCurrentAgent:
 
 def test_add_one_to_current():
 
-    async def run_add_one_test():
-        router = Router()
-        directory = Directory(router, VLM.LOCAL)
-        addOneAgent = await AddOneToCurrentAgent(router)
-        getCurrentAgent = await GetCurrentAgent(router, 500)
+    async def run_actual_test(router):
         conn = router.newConnection()
 
         # check that AddOneToCurrentAgent can find GetCurrentAgent and get a reply eventually
-        toAddr = addOneAgent.conn.addr          # cheat instead of getting address from directory
-        msg = Msg(toAddr, AddOneToCurrentAgent.ADD_ONE_TO_CURRENT, None)
+        addOneAgentAddr = Missing
+        while not addOneAgentAddr:
+            addOneAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, AddOneToCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
+        msg = Msg(addOneAgentAddr, AddOneToCurrentAgent.ADD_ONE_TO_CURRENT, None)
         res = await conn.send(msg, 5000)
         _PPMsg(f'Got', f'{res.subject} = {res.contents}')
 
         # kill off the GetCurrentAgent to test that the AddOneToCurrentAgent copes
-        getCurrentAgent.conn = None
-        getCurrentAgent = None
+        getCurrentAgentAddr = Missing
+        while not getCurrentAgentAddr:
+            getCurrentAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
+        res = await conn.send(Msg(getCurrentAgentAddr, GetCurrentAgent.KILL, None), 500)
+        assert res and res.subject == GetCurrentAgent.KILL_REPLY
+
         await asyncio.sleep(0.01)
+
+        res = await conn.send(Msg(getCurrentAgentAddr, GetCurrentAgent.KILL, None), 100)
+        assert not res
 
         # start a new GetCurrentAgent
         getCurrentAgent = await GetCurrentAgent(router, 0)
 
         # test resilience of AddOneToCurrentAgent
-        toAddr = addOneAgent.conn.addr          # ditto
-        msg = Msg(addOneAgent.conn.addr, AddOneToCurrentAgent.ADD_ONE_TO_CURRENT, None)
+        msg = Msg(addOneAgentAddr, AddOneToCurrentAgent.ADD_ONE_TO_CURRENT, None)
         res = await conn.send(msg, 5000)
         _PPMsg(f'Got', f'{res.subject} = {res.contents}')
+        assert res.contents == 43
 
+
+    async def run_add_one_test():
+        router = Router()
+        directory = Directory(router, VLM.LOCAL)
+        a1 = await AddOneToCurrentAgent(router)
+        a2 = await GetCurrentAgent(router, 500)
+        try:
+            await run_actual_test(router)
+            passed = True
+        except AssertionError as ex:
+            passed = False
         await router.shutdown()
-        return res.contents
+        return passed
 
     res = asyncio.run(run_add_one_test())
-    assert res == 42
+    assert res
+
+
+def runAll(seqOfFnAndArgs):
+    async def _startAgents():
+        router = Router()
+        agents = []
+        for fn, args in seqOfFnAndArgs:
+            agent = fn(router, *args)
+            agents.append(agent)
+        await router.shutdown()
+    asyncio.run(_startAgents())
+
 
 
 def run_in_subprocess():
@@ -129,6 +166,27 @@ def run_in_subprocess():
     p.start()
     p.join()
     print(f'parentid: {os.getpid()}, childid: {p.pid}')
+
+    # p = multiprocessing.Process(target=runAll, args=(
+    #     (Directory, (VLM.LOCAL,)),
+    #     (AddOneToCurrentAgent, ()),
+    #     (GetCurrentAgent, (500,)),
+    #     (runAddOneTest, ()),
+    # ))
+
+    # p1 = multiprocessing.Process(target=runAll, args=(
+    #     (Directory, (VLM.MACHINE,)),
+    #     (AddOneToCurrentAgent, ()),
+    # ))
+    # p2 = multiprocessing.Process(target=runAll, args=(
+    #     (Directory, (VLM.MACHINE,)),
+    #     (GetCurrentAgent, ()),
+    # ))
+    # p3 = multiprocessing.Process(target=runAll, args=(
+    #     (Directory, (VLM.MACHINE,)),
+    #     (AddOneToCurrentAgent, ()),
+    # ))
+
 
 
 
