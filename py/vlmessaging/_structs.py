@@ -10,6 +10,8 @@
 # Python imports
 import collections
 
+# 3rd party imports
+from coppertop.utils import Missing
 
 # OPEN: if we route via a single inter-machine router then we will need a machineId in Addr - maybe added sooner than later?
 Addr = collections.namedtuple('Addr', ('routerId', 'connectionId'))
@@ -30,10 +32,17 @@ class Msg:
         self.contents = contents
         self.meta = {}
 
-    def reply(self, subject, contents):
-        answer = Msg(self.fromAddr, subject, contents)
+    def reply(self, contents, *, subject=Missing):
+        answer = Msg(self.fromAddr, subject or self.subject, contents)
         answer._replyId = self._msgId
         return answer
 
+    @property
+    def isReply(self):
+        return self._replyId is not None
+
     def __repr__(self):
-        return f'Msg({self.fromAddr!s} -> {self.toAddr!s} "{self.subject!s}" msgId: {self._msgId}, replyId: {self._replyId})'
+        if self._replyId is None:
+            return f'Msg({self.fromAddr!s} -> {self.toAddr!s} "{self.subject!s}" msgId: {self._msgId})'
+        else:
+            return f'Msg({self.fromAddr!s} -> {self.toAddr!s} "{self.subject!s}"_REPLY msgId: {self._msgId}, replyId: {self._replyId})'

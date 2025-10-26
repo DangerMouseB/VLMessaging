@@ -25,7 +25,6 @@ class PingPongAgent:
     PING = 'PING'
     PONG = 'PONG'
     DO_IT = 'DO_IT'
-    DO_IT_REPLY = 'DO_IT_REPLY'
     DO_IT_PROGRESS = 'DO_IT_PROGRESS'
     SHUTDOWN = 'SHUTDOWN'
 
@@ -57,7 +56,7 @@ class PingPongAgent:
             contents['n'] += 1
             if contents['n'] >= contents['N']:
                 contents['t2'] = time.perf_counter_ns()
-                reply = contents['msg'].reply(self.DO_IT_REPLY, contents)
+                reply = contents['msg'].reply(contents)
                 await self.conn.send(reply)
             else:
                 reply = Msg(msg.replyTo, self.PONG if msg.subject == self.PING else self.PING, contents)

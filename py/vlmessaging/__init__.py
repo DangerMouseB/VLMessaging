@@ -9,7 +9,4 @@
 
 from vlmessaging._core import Connection, Router, Directory, ExitMessageHandler
 from vlmessaging._structs import Addr, Msg, Entry
-from vlmessaging._constants import PUB, DIRECTORY, REGISTER_ENTRY, REGISTER_ENTRY_REPLY, UNREGISTER_ENTRY, \
-    UNREGISTER_ENTRY_REPLY, GET_ENTRIES, GET_ENTRIES_REPLY, HEARTBEAT, HEARTBEAT_REPLY, DIRECTORY_ADDR, \
-    DIRECTORY_CONNECTION_ID, DOES_NOT_UNDERSTAND, LOCAL, MSG_NOT_DELIVERED, UNREGISTER_ADDR
 from vlmessaging import _constants as VLM

@@ -25,9 +25,7 @@ class GetCurrentAgent:
 
     ENTRY_TYPE = 'GetCurrentAgent'
     GET_CURRENT = 'GET_CURRENT'
-    GET_CURRENT_REPLY = 'GET_CURRENT_REPLY'
     KILL = 'KILL'
-    KILL_REPLY = 'KILL_REPLY'
 
     async def __init__(self, router, wait):
         self.conn = router.newConnection(self.msgArrived)
@@ -45,11 +43,11 @@ class GetCurrentAgent:
         if msg.subject == self.GET_CURRENT:
             await asyncio.sleep(self.wait / 1000)
             self.wait = max(0, self.wait - 100)
-            await self.conn.send( msg.reply(self.GET_CURRENT_REPLY, 41) )
+            await self.conn.send( msg.reply(41) )
 
         if msg.subject == self.KILL:
             self.running = False
-            await self.conn.send( msg.reply(self.KILL_REPLY, None) )
+            await self.conn.send( msg.reply(None) )
             self.conn = None
 
         else:
@@ -63,7 +61,6 @@ class AddOneToCurrentAgent:
 
     ENTRY_TYPE = 'AddOneToCurrentAgent'
     ADD_ONE_TO_CURRENT = 'ADD_ONE_TO_CURRENT'
-    ADD_ONE_TO_CURRENT_REPLY = 'ADD_ONE_TO_CURRENT_REPLY'
 
     async def __init__(self, router):
         self.conn = router.newConnection(self.msgArrived)
@@ -78,13 +75,13 @@ class AddOneToCurrentAgent:
     async def msgArrived(self, msg):
 
         if msg.subject == self.ADD_ONE_TO_CURRENT:
-            errMsg = msg.reply(self.ADD_ONE_TO_CURRENT_REPLY, RuntimeError(f'Can\'t find a {GetCurrentAgent.ENTRY_TYPE}'))
+            errMsg = msg.reply(RuntimeError(f'Can\'t find a {GetCurrentAgent.ENTRY_TYPE}'))
             current = Missing
             while not current:
                 if self.addrOfGetCurrentAgent is Missing:
                     self.addrOfGetCurrentAgent = await _findSingleEntryAddrOfTypeOrExit(self.conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg)
                 current = await self.conn.send(Msg(self.addrOfGetCurrentAgent, GetCurrentAgent.GET_CURRENT, Missing), 200)
-            reply = msg.reply(self.ADD_ONE_TO_CURRENT_REPLY, current.contents + 1)
+            reply = msg.reply(current.contents + 1)
             await self.conn.send(reply)
 
         elif msg.subject == VLM.MSG_NOT_DELIVERED:
@@ -97,40 +94,42 @@ class AddOneToCurrentAgent:
 
 
 
+async def _test_add_one_to_current(router):
+    conn = router.newConnection()
+
+    # check that AddOneToCurrentAgent can find GetCurrentAgent and get a reply eventually
+    addOneAgentAddr = Missing
+    while not addOneAgentAddr:
+        addOneAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, AddOneToCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
+    msg = Msg(addOneAgentAddr, AddOneToCurrentAgent.ADD_ONE_TO_CURRENT, None)
+    res = await conn.send(msg, 5000)
+    _PPMsg(f'Got', f'{res.subject} = {res.contents}')
+
+    # kill off the GetCurrentAgent to test that the AddOneToCurrentAgent copes
+    getCurrentAgentAddr = Missing
+    while not getCurrentAgentAddr:
+        getCurrentAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
+    res = await conn.send(Msg(getCurrentAgentAddr, GetCurrentAgent.KILL, None), 500)
+    assert res and res.isReply
+    await asyncio.sleep(0.01)
+    res = await conn.send(Msg(getCurrentAgentAddr, GetCurrentAgent.KILL, None), 100, additional_subjects=[VLM.MSG_NOT_DELIVERED])
+    assert res and res.isReply and res.subject == VLM.MSG_NOT_DELIVERED
+
+    # start a new GetCurrentAgent
+    getCurrentAgent = await GetCurrentAgent(router, 0)
+
+    # test resilience of AddOneToCurrentAgent
+    msg = Msg(addOneAgentAddr, AddOneToCurrentAgent.ADD_ONE_TO_CURRENT, None)
+    res = await conn.send(msg, 5000)
+    _PPMsg(f'Got', f'{res.subject} = {res.contents}')
+    assert res.contents == 42
+
+    # shutdown the test harness
+    await router.shutdown()
+
+
+
 def test_add_one_to_current():
-
-    async def run_actual_test(router):
-        conn = router.newConnection()
-
-        # check that AddOneToCurrentAgent can find GetCurrentAgent and get a reply eventually
-        addOneAgentAddr = Missing
-        while not addOneAgentAddr:
-            addOneAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, AddOneToCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
-        msg = Msg(addOneAgentAddr, AddOneToCurrentAgent.ADD_ONE_TO_CURRENT, None)
-        res = await conn.send(msg, 5000)
-        _PPMsg(f'Got', f'{res.subject} = {res.contents}')
-
-        # kill off the GetCurrentAgent to test that the AddOneToCurrentAgent copes
-        getCurrentAgentAddr = Missing
-        while not getCurrentAgentAddr:
-            getCurrentAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
-        res = await conn.send(Msg(getCurrentAgentAddr, GetCurrentAgent.KILL, None), 500)
-        assert res and res.subject == GetCurrentAgent.KILL_REPLY
-
-        await asyncio.sleep(0.01)
-
-        res = await conn.send(Msg(getCurrentAgentAddr, GetCurrentAgent.KILL, None), 100)
-        assert not res
-
-        # start a new GetCurrentAgent
-        getCurrentAgent = await GetCurrentAgent(router, 0)
-
-        # test resilience of AddOneToCurrentAgent
-        msg = Msg(addOneAgentAddr, AddOneToCurrentAgent.ADD_ONE_TO_CURRENT, None)
-        res = await conn.send(msg, 5000)
-        _PPMsg(f'Got', f'{res.subject} = {res.contents}')
-        assert res.contents == 43
-
 
     async def run_add_one_test():
         router = Router()
@@ -138,41 +137,49 @@ def test_add_one_to_current():
         a1 = await AddOneToCurrentAgent(router)
         a2 = await GetCurrentAgent(router, 500)
         try:
-            await run_actual_test(router)
+            await _test_add_one_to_current(router)
             passed = True
         except AssertionError as ex:
             passed = False
-        await router.shutdown()
+        await router.hasShutdown()
         return passed
 
     res = asyncio.run(run_add_one_test())
     assert res
 
 
-def runAll(seqOfFnAndArgs):
+def _run_all(seqOfFnAndArgs):
     async def _startAgents():
         router = Router()
         agents = []
+        passed = True
         for fn, args in seqOfFnAndArgs:
-            agent = fn(router, *args)
-            agents.append(agent)
+            try:
+                agent = await fn(router, *args)
+                agents.append(agent)
+            except AssertionError as ex:
+                passed = False
         await router.shutdown()
-    asyncio.run(_startAgents())
-
+        return passed
+    res = asyncio.run(_startAgents())
+    assert res
 
 
 def run_in_subprocess():
     p = multiprocessing.Process(target=test_add_one_to_current)
+
+    # p = multiprocessing.Process(target=_run_all, args=(
+    #     (Directory, (VLM.LOCAL,)),
+    #     (AddOneToCurrentAgent, ()),
+    #     (GetCurrentAgent, (500,)),
+    #     (_test_add_one_to_current, ()),
+    # ))
+
     p.start()
     p.join()
     print(f'parentid: {os.getpid()}, childid: {p.pid}')
 
-    # p = multiprocessing.Process(target=runAll, args=(
-    #     (Directory, (VLM.LOCAL,)),
-    #     (AddOneToCurrentAgent, ()),
-    #     (GetCurrentAgent, (500,)),
-    #     (runAddOneTest, ()),
-    # ))
+
 
     # p1 = multiprocessing.Process(target=runAll, args=(
     #     (Directory, (VLM.MACHINE,)),

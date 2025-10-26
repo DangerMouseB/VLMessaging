@@ -48,13 +48,6 @@
 
 
 
-# OPEN: to implement
-# allow a synchronous message to just wait for certain subjects so others can be handled by the message handler
-# e.g. reply = await conn.send(msg, timeout=5000, subjects=[self.ADD_ONE_TO_CURRENT_REPLY])
-# this allows the network to be setup / repaired in the background while waiting for a specific reply
-
-
-
 # Python imports
 import itertools, io, logging, pynng, asyncio, weakref
 from amazon.ion import simpleion
@@ -78,62 +71,66 @@ class ExitMessageHandler(Exception): pass
 
 class Connection:
 
-    __slots__ = ('_router', '_msgArrivedFn', '_futureByReplyId', '_msgIdSeed', 'addr', '__weakref__')
+    __slots__ = ('_router', '_msgArrivedFn', '_futureAndSubjectsByReplyId', '_msgIdSeed', 'addr', '__weakref__')
 
     def __init__(self, router, connectionId, fn):
         self._router = router
         self._msgArrivedFn = fn
-        self._futureByReplyId = {}
+        self._futureAndSubjectsByReplyId = {}
         self._msgIdSeed = itertools.count(1)
         self.addr = Addr(VLM.LOCAL, connectionId)
 
     async def _deliver(self, msg):
-        if (fut := self._futureByReplyId.pop(msg._replyId, Missing)) is Missing:
-            if self._msgArrivedFn:
-                # no future waiting for this reply so just pass it to the handler
-                _PPMsg(f'deliver msg', msg._msgId)
-                try:
-                    res = await self._msgArrivedFn(msg)
-                    if res is None:
-                        pass
-                    else:
-                        if isinstance(res, str): res = [str]
-                        handled = False
-                        for instruction in res:
-                            if instruction == VLM.IGNORE_UNHANDLED_REPLIES:
-                                if msg.subject.endswith('_REPLY'):
-                                    handled = True
-                                    break
-                            elif instruction == VLM.HANDLE_DOES_NOT_UNDERSTAND:
-                                if msg.subject == VLM.DOES_NOT_UNDERSTAND:
-                                    handled = True
-                                else:
-                                    _PPMsg(f'UNHANDLED SUBJECT', msg)
-                                    await self.send(msg.reply(VLM.DOES_NOT_UNDERSTAND, msg.subject))
-                                    handled = True
-                            else:
-                                raise SyntaxError(f'Unknown instruction "{msg.subject}".')
-                        if not handled:
-                            _PPMsg(f'UNHANDLED SUBJECT', msg)
-                except ExitMessageHandler as ex:
-                    pass
-            else:
-                if msg.subject == VLM.MSG_NOT_DELIVERED:
-                    # don't get into a loop of undeliverable messages
+        if (futAndSubjects := self._futureAndSubjectsByReplyId.pop(msg._replyId, Missing)) is not Missing:
+            fut, subjects = futAndSubjects
+            if msg.subject in subjects:
+                # we have a future waiting for this reply
+                if fut.done():
+                    # is this possible?
                     pass
                 else:
-                    # no handler so reply it wasn't delivered
-                    _PPMsg(f'undeliverable', msg._msgId)
-                    await self.send(msg.reply(VLM.MSG_NOT_DELIVERED, msg.toAddr))
+                    # we have the reply in time so pass it to the future
+                    _PPMsg(f'deliver reply', msg._msgId)
+                    fut.set_result(msg)
+                return None
+
+        if self._msgArrivedFn:
+            # no future waiting for this reply so just pass it to the handler
+            _PPMsg(f'deliver msg', msg._msgId)
+            try:
+                res = await self._msgArrivedFn(msg)
+                if res is None:
+                    pass
+                else:
+                    if isinstance(res, str): res = [str]
+                    handled = False
+                    for instruction in res:
+                        if instruction == VLM.IGNORE_UNHANDLED_REPLIES:
+                            if msg.isReply:
+                                handled = True
+                                break
+                        elif instruction == VLM.HANDLE_DOES_NOT_UNDERSTAND:
+                            if msg.subject == VLM.DOES_NOT_UNDERSTAND:
+                                handled = True
+                            else:
+                                _PPMsg(f'UNHANDLED SUBJECT', msg)
+                                await self.send(msg.reply(msg.subject, subject=VLM.DOES_NOT_UNDERSTAND))
+                                handled = True
+                        else:
+                            raise SyntaxError(f'Unknown instruction "{msg.subject}".')
+                    if not handled:
+                        _PPMsg(f'UNHANDLED SUBJECT', msg)
+            except ExitMessageHandler as ex:
+                pass
         else:
-            # we have a future waiting for this reply
-            if fut.done():
-                # is this possible?
+            if msg.subject == VLM.MSG_NOT_DELIVERED:
+                # don't get into a loop of undeliverable messages
                 pass
             else:
-                # we have the reply in time so pass it to the future
-                _PPMsg(f'deliver reply', msg._msgId)
-                fut.set_result(msg)
+                # no handler so reply it wasn't delivered
+                _PPMsg(f'undeliverable', msg._msgId)
+                await self.send(msg.reply(msg.toAddr, subject=VLM.MSG_NOT_DELIVERED))
+
 
     # def _send(self, msg, timeout=Missing) -> Msg | Missing:
     #     # if timeout is Missing send asynchronously
@@ -149,7 +146,7 @@ class Connection:
     #             raise NotYetImplemented()
     #         raise NotYetImplemented()
 
-    async def send(self, msg, timeout=Missing, subjects=Missing):
+    async def send(self, msg, timeout=Missing, additional_subjects=Missing):
         # return reply, Missing if timeout exceeded or None if no timeout
         msg._msgId = next(self._msgIdSeed)
         msg.fromAddr = self.addr
@@ -157,7 +154,11 @@ class Connection:
             # semi-sync send - wait for reply or timeout
             loop = asyncio.get_running_loop()
             fut = loop.create_future()
-            self._futureByReplyId[msg._msgId] = fut
+            if additional_subjects is Missing:
+                subjects = [msg.subject]
+            else:
+                subjects = [msg.subject] + additional_subjects
+            self._futureAndSubjectsByReplyId[msg._msgId] = (fut, subjects)
             _PPMsg(f'send({timeout})', msg)
             self._router._route(msg)
             try:
@@ -165,7 +166,7 @@ class Connection:
             except asyncio.TimeoutError:
                 _PPMsg(f'TIMED OUT', msg)
                 reply = Missing
-            self._futureByReplyId.pop(msg._msgId, None)
+            self._futureAndSubjectsByReplyId.pop(msg._msgId, None)
             return reply
         else:
             # async send
@@ -175,7 +176,7 @@ class Connection:
 
     def __del__(self):
         # clean up any pending futures
-        for fut in self._futureByReplyId.values():
+        for fut in self._futureAndSubjectsByReplyId.values():
             if not fut.done():
                 fut.set_result(Missing)
         # tell router
@@ -196,7 +197,7 @@ class Router:
         '_connectionById', '_inboxById',
         '_connectionIdSeed', '_refreshInboxTasks',
         '_entries',
-        '_closingDown',
+        '_closingDown', '_hasShutdown',
     )
 
     def __init__(self):
@@ -208,6 +209,7 @@ class Router:
         self._entries = {}
         asyncio.create_task(self._processInboxes())
         self._closingDown = asyncio.Event()
+        self._hasShutdown = asyncio.Event()
 
     def newConnection(self, fn=Missing):
         return self._newConnection(next(self._connectionIdSeed), fn)
@@ -224,6 +226,10 @@ class Router:
         self._connectionById = {}
         self._closingDown.set()
         await asyncio.sleep(0.01)  # do this here so the client doesn't have to - annoyingly we can't loop until done
+        self._hasShutdown.set()
+
+    async def hasShutdown(self):
+        await self._hasShutdown.wait()
 
     def _dropInboxFor(self, connectionId):
         self._inboxById.pop(connectionId, None)
@@ -241,9 +247,8 @@ class Router:
                     # don't get into a loop of undeliverable messages
                     pass
                 else:
-                    reply = msg.reply(VLM.MSG_NOT_DELIVERED, msg.toAddr)
+                    reply = msg.reply(msg.toAddr, subject=VLM.MSG_NOT_DELIVERED)
                     reply._msgId = -1
-                    reply._replyId = None
                     inbox = self._inboxById.get(reply.toAddr.connectionId, Missing)
                     if inbox:
                         _PPMsg(f'unroutable', msg._msgId)
@@ -462,33 +467,33 @@ class Directory:
             addr, service, params = msg.contents
             for a, s, p in self._entries:
                 if a == addr and s == service and p == params:
-                    await self._conn.send( msg.reply(VLM.REGISTER_ENTRY_REPLY, True) )
+                    await self._conn.send( msg.reply(True) )
                     return
             self._entries.append( msg.contents )
-            await self._conn.send(msg.reply(VLM.REGISTER_ENTRY_REPLY, True))
+            await self._conn.send(msg.reply(True))
 
         elif msg.subject == VLM.UNREGISTER_ENTRY:
             entry = msg.contents
             self._entries = [e for e in self._entries if e != entry]
-            await self._conn.send(msg.reply(VLM.UNREGISTER_ENTRY_REPLY, True))
+            await self._conn.send(msg.reply(True))
 
         elif msg.subject == VLM.UNREGISTER_ADDR:
             addr = msg.contents
             self._entries = [e for e in self._entries if e.addr != addr]
-            await self._conn.send(msg.reply(VLM.UNREGISTER_ADDR_REPLY, True))
+            await self._conn.send(msg.reply(True))
 
         elif msg.subject == VLM.GET_ENTRIES:
             if msg.contents:
-                await self._conn.send(msg.reply(VLM.GET_ENTRIES_REPLY, [e for e in self._entries if e.service == msg.contents]))
+                await self._conn.send(msg.reply([e for e in self._entries if e.service == msg.contents]))
             else:
-                await self._conn.send(msg.reply(VLM.GET_ENTRIES_REPLY, self._entries))
+                await self._conn.send(msg.reply(self._entries))
 
         elif msg.subject == VLM.HEARTBEAT:
             # OPEN: should check that a given entry exists
-            await self._conn.send(msg.reply(VLM.HEARTBEAT_REPLY, None))
+            await self._conn.send(msg.reply(None))
 
         else:
-            await self._conn.send(msg.reply(VLM.DOES_NOT_UNDERSTAND, msg.subject))
+            await self._conn.send(msg.reply(msg.subject, subject=VLM.DOES_NOT_UNDERSTAND))
 
 
 
