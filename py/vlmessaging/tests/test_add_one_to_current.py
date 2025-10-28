@@ -8,14 +8,16 @@
 # **********************************************************************************************************************
 
 # Python imports
-import asyncio, multiprocessing, os
+import asyncio, multiprocessing, os, inspect, itertools
+from copy import copy
 
 # 3rd party imports
 from coppertop.utils import Missing
 
 # local imports
 from vlmessaging import Msg, Router, Entry, Directory, VLM
-from vlmessaging.utils import _findSingleEntryAddrOfTypeOrExit, _PPMsg, with_async_init
+from vlmessaging.utils import with_async_init
+from vlmessaging._utils import _findSingleEntryAddrOfTypeOrExit, _PPMsg
 
 
 @with_async_init
@@ -129,74 +131,94 @@ async def _test_add_one_to_current(router):
 
 
 
-def test_add_one_to_current():
-
-    async def run_add_one_test():
-        router = Router()
-        directory = Directory(router, VLM.LOCAL)
-        a1 = await AddOneToCurrentAgent(router)
-        a2 = await GetCurrentAgent(router, 500)
-        try:
-            await _test_add_one_to_current(router)
-            passed = True
-        except AssertionError as ex:
-            passed = False
-        await router.hasShutdown()
-        return passed
-
-    res = asyncio.run(run_add_one_test())
-    assert res
-
-
-def _run_all(seqOfFnAndArgs):
-    async def _startAgents():
+def _startAgents(outBox, seqOfFnAndArgs):
+    async def _():
         router = Router()
         agents = []
-        passed = True
-        for fn, args in seqOfFnAndArgs:
-            try:
-                agent = await fn(router, *args)
+        try:
+            for fn, args in seqOfFnAndArgs:
+                agent = fn(router, *args)
+                if inspect.iscoroutine(agent):
+                    agent = await agent
                 agents.append(agent)
-            except AssertionError as ex:
-                passed = False
-        await router.shutdown()
-        return passed
-    res = asyncio.run(_startAgents())
-    assert res
+        except AssertionError as e:
+            outBox.put((os.getpid(), False))
+            raise e
+        finally:
+            await router.shutdown()
+        await router.hasShutdown()
+        outBox.put((os.getpid(), True))
+    asyncio.run(_())
 
 
-def run_in_subprocess():
-    p = multiprocessing.Process(target=test_add_one_to_current)
-
-    # p = multiprocessing.Process(target=_run_all, args=(
-    #     (Directory, (VLM.LOCAL,)),
-    #     (AddOneToCurrentAgent, ()),
-    #     (GetCurrentAgent, (500,)),
-    #     (_test_add_one_to_current, ()),
-    # ))
-
+def test_add_one_to_current_1():
+    outBox = multiprocessing.Queue()
+    p = multiprocessing.Process(target=_startAgents, args=(
+        outBox,
+        [
+            (Directory, (VLM.LOCAL,)),
+            (AddOneToCurrentAgent, ()),
+            (GetCurrentAgent, (500,)),
+            (_test_add_one_to_current, ()),
+        ]
+    ))
     p.start()
     p.join()
-    print(f'parentid: {os.getpid()}, childid: {p.pid}')
+    res = outBox.get()
+    assert res[1], 'test_add_one_to_current_1 failed'
 
 
+def test_add_one_to_current_2():
+    outBox = multiprocessing.Queue()
+    p1 = multiprocessing.Process(target=_startAgents, args=(
+        outBox,
+        [
+            (Directory, (VLM.MACHINE,)),
+            (AddOneToCurrentAgent, ()),
+        ]
+    ))
+    p2 = multiprocessing.Process(target=_startAgents, args=(
+        outBox,
+        [
+            (Directory, (VLM.MACHINE,)),
+            (GetCurrentAgent, (500,)),
+        ]
+    ))
+    p3 = multiprocessing.Process(target=_startAgents, args=(
+        outBox,
+        [
+            (Directory, (VLM.MACHINE,)),
+            (_test_add_one_to_current, ()),
+        ]
+    ))
+    p1.start()
+    p2.start()
+    p3.start()
+    p1.join()
+    p2.join()
+    p3.join()
+    nameByPid = {p1.pid: 'p1', p2.pid: 'p2', p3.pid: 'p3'}
+    failures = []
+    for _ in range(3):
+        res = outBox.get()
+        if not res[1]:
+            failures.append(nameByPid[res[0]])
+    assert not failures, f'test_add_one_to_current_2 failed for {", ".join(failures)}'
 
-    # p1 = multiprocessing.Process(target=runAll, args=(
-    #     (Directory, (VLM.MACHINE,)),
-    #     (AddOneToCurrentAgent, ()),
-    # ))
-    # p2 = multiprocessing.Process(target=runAll, args=(
-    #     (Directory, (VLM.MACHINE,)),
-    #     (GetCurrentAgent, ()),
-    # ))
-    # p3 = multiprocessing.Process(target=runAll, args=(
-    #     (Directory, (VLM.MACHINE,)),
-    #     (AddOneToCurrentAgent, ()),
-    # ))
 
-
+class CountFailures(object):
+    def __init__(self, counter):
+        self.counter = counter
+    def __enter__(self):
+        return None
+    def __exit__(self, type, value, traceback):
+        if value is not None: next(self.counter)
+        return True
 
 
 if __name__ == "__main__":
-    run_in_subprocess()
-    print('passed')
+    failures = itertools.count()
+    with CountFailures(failures): test_add_one_to_current_1()
+    # with CountFailures(failures): test_add_one_to_current_2()
+    print()
+    print('failed' if failures.__reduce__()[1][0] else 'passed')
