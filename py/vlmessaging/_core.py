@@ -304,6 +304,8 @@ class Router:
             await asyncio.sleep(0)
         _PPMsg('shutdown', '')
 
+
+
     # wip
 
     async def tryStartDirectory(self):
@@ -447,7 +449,7 @@ class Directory:
     The Directory is the place where agents can advertise services they provide. It can be configured to:
     - act alone (LOCAL mode) without cooperation with other directories,
     - in cooperation with other Directories on a local machine (MACHINE mode),
-    - or with other Directores accessible on the netweork (NETWORK mode).
+    - or with other Directories accessible on the netweork (NETWORK mode).
 
     Agents can register and unregister their services here, and connections can query for available services.
     '''
