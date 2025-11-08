@@ -7,18 +7,19 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
+
 # 3rd party imports
 from coppertop.utils import Missing
 
 # local imports
-from vlmessaging import Msg, VLM, ExitMessageHandler
-from vlmessaging._core import _PPMsg    # reimported elsewhere do not remove
+from vlmessaging import _constants as VLM
+from vlmessaging._core import ExitMessageHandler, Msg, Addr
 
 
 # work-in-progress utils
 
 async def _findEntriesOfTypeOrExit(connection, entryType, timeout, errMsg):
-    res = await connection.send(Msg(VLM.DIRECTORY, VLM.GET_ENTRIES, entryType), timeout)
+    res = await connection.send(Msg(Addr(None, None, VLM.DIRECTORY), VLM.GET_ENTRIES, entryType), timeout)
     if res is Missing:
         if errMsg: await connection.send(errMsg)
         raise ExitMessageHandler()
@@ -26,7 +27,7 @@ async def _findEntriesOfTypeOrExit(connection, entryType, timeout, errMsg):
         return res.contents
 
 async def _findSingleEntryAddrOfTypeOrExit(connection, entryType, timeout, errMsg):
-    res = await connection.send(Msg(VLM.DIRECTORY, VLM.GET_ENTRIES, entryType), timeout)
+    res = await connection.send(Msg(Addr(None, None, VLM.DIRECTORY), VLM.GET_ENTRIES, entryType), timeout)
     if res is Missing:
         if errMsg: await connection.send(errMsg)
         raise ExitMessageHandler()
@@ -35,3 +36,4 @@ async def _findSingleEntryAddrOfTypeOrExit(connection, entryType, timeout, errMs
             return entry.addr
     if errMsg: await connection.send(errMsg)
     raise ExitMessageHandler()
+

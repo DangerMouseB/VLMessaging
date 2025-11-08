@@ -7,62 +7,73 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
-# Router is responsible for routing messages between local connections and / or other routers in other local and / or
-# remote. Local routing does not require serialisation, cross process / cross machine routing does.
-# if nng's ipc transport is faster than its tcp transport then the router should use it in the background
-
-# if we want this router to publish agents in the directory then it must have two listener sockets, one (ipc based) for
-# local agents from this machine, and another (tcp based) for remote agents on other machines. These sockets can be
-# created lazily whenever an agent advertises itself. The local directory name shall be "ipc:///tmp/local_dir.ipc"
-
-# threading design
-# each daemon with a connection is on its own thread - so preemptive (albeit single threaded at the interpreter level)
-# we want the router itself to be non-blocking so use Python's async methods
-# pubsub will be sent via a socket rather than locally
-
-# every router needs to be connected to the directory daemon so we can build the network on an adhoc basis
-# before a router can listener it must get an address from the directory
-# directory can heartbeat - hopefully GIL won't delay heartbeat intervals significant
-# dial the directory, if refused, launch a directory process, if starting up and get Address in use abandon startup
-
-# ASSUMPTIONS
-# - resources to do inter-machine communication are scarcer (e.g. ports), intra-machine resources are plentiful
-
-# INTERMACHINE TOPOLOGY
-# 2 options:
-# 1. any router can connect to another machine - each listener requires a port
-#    - 1 hop messaging but harder to do firewall rules
-# 2. one router per machine connects to other machines - just one listener per machine
-#    - easier to do firewall rules, but 1-3 hop messaging (depends if sender and receiver are on the main router or not)
-#    - harder to use multicast scalability protocols
-# OPEN:
-# - easier to do security at the central router?
-# - could mix the two approaches - since cross machine services are less common
-
-
-# VLM.DIRECTORY should be a logical address where you can find out everything you may need to know about services
-# available. Physically if it is a local directory, an isolated machine one or a machine one connected to other
-# machines is a matter of configuration. Ultimately we could do virtual networks and bridge between them but that is
-# for another day. Also authentication and authorisation should be built in from the ground up and will affect the
-# experience a given agent has of the world around it.
-
-
 
 # Python imports
-import itertools, io, logging, pynng, asyncio, weakref
+import itertools, logging, pynng, asyncio, weakref, collections, io
 from amazon.ion import simpleion
 
 # coppertop imports
 from coppertop.utils import Missing, NotYetImplemented, ProgrammerError
 
 # local imports
-from vlmessaging._structs import Addr, Msg
 from vlmessaging import _constants as VLM
 
 
 _logger = logging.getLogger(__name__)
 
+
 class ExitMessageHandler(Exception): pass
+
+
+# **********************************************************************************************************************
+# Structs
+# **********************************************************************************************************************
+
+Addr = collections.namedtuple('Addr', ('machineId', 'routerId', 'connectionId'))
+def Addr__str__(self):
+    if self.routerId is None:
+        return f'<{self.connectionId}>'
+    elif self.machineId is None:
+        return f'<{self.routerId}:{self.connectionId}>'
+    else:
+        return f'<{self.machineId}:{self.routerId}:{self.connectionId}>'
+Addr.__str__ = Addr__str__
+
+
+Entry = collections.namedtuple('Entry', ('addr', 'service', 'params', 'vnets', 'perms'))
+
+
+Perm =  collections.namedtuple('Perm', ('domain', 'permId'))
+
+
+class Msg:
+
+    __slots__ = ('fromAddr', 'toAddr', 'subject', '_msgId', '_replyId', 'contents', 'meta')
+
+    def __init__(self, toAddr, subject, contents):
+        self.fromAddr = None
+        self.toAddr = toAddr
+        self.subject = subject
+        self._msgId = None
+        self._replyId = None
+        self.contents = contents
+        self.meta = {}
+
+    def reply(self, contents, *, subject=Missing):
+        answer = Msg(self.fromAddr, subject or self.subject, contents)
+        answer._replyId = self._msgId
+        return answer
+
+    @property
+    def isReply(self):
+        return self._replyId is not None
+
+    def __repr__(self):
+        if self._replyId is None:
+            return f'Msg({self.fromAddr!s} -> {self.toAddr!s} "{self.subject!s}" msgId: {self._msgId})'
+        else:
+            return f'Msg({self.fromAddr!s} -> {self.toAddr!s} "{self.subject!s}" REPLY msgId: {self._msgId}, replyId: {self._replyId})'
+
 
 
 # **********************************************************************************************************************
@@ -78,7 +89,7 @@ class Connection:
         self._msgArrivedFn = fn
         self._futureAndSubjectsByReplyId = {}
         self._msgIdSeed = itertools.count(1)
-        self.addr = Addr(VLM.LOCAL, connectionId)
+        self.addr = Addr(Missing, VLM.LOCAL, connectionId)
 
     async def _deliver(self, msg):
         if (futAndSubjects := self._futureAndSubjectsByReplyId.pop(msg._replyId, Missing)) is not Missing:
@@ -236,12 +247,12 @@ class Router:
         self._refreshInboxTasks = True
 
     def _route(self, msg):
-        routerId, cid = msg.toAddr
+        machineId, routerId, connectionId = msg.toAddr
         if routerId == VLM.LOCAL:
-            conn = self._connectionById.get(cid, Missing)
+            conn = self._connectionById.get(connectionId, Missing)
             if conn:
                 _PPMsg(f'route', msg._msgId)
-                self._inboxById[cid].put_nowait(msg)
+                self._inboxById[connectionId].put_nowait(msg)
             else:
                 if msg.subject == VLM.MSG_NOT_DELIVERED:
                     # don't get into a loop of undeliverable messages
@@ -268,7 +279,7 @@ class Router:
             if self._connectionById:
                 if self._refreshInboxTasks:
                     # drop any tasks for closed connections
-                    tasksToRemove = {t: cid for t, cid in tasks.items() if cid not in self._connectionById and cid > 0}
+                    tasksToRemove = {t: cId for t, cId in tasks.items() if cId not in self._connectionById and cId > 0}
                     for t in tasksToRemove:
                         # _PPMsg(f'dropping', f'{tasksToRemove[t]}')
                         t.cancel('no longer needed')
@@ -277,9 +288,9 @@ class Router:
                         tasks.pop(t)
                     await asyncio.gather(*tasksToRemove, return_exceptions=True)
                     # add any new connections
-                    for cid, conn in self._connectionById.items():
-                        if cid not in tasks.values():
-                            tasks[asyncio.create_task(self._inboxById[cid].get())] = cid
+                    for cId, conn in self._connectionById.items():
+                        if cId not in tasks.values():
+                            tasks[asyncio.create_task(self._inboxById[cId].get())] = cId
                     self._refreshInboxTasks = False
                 # wait for one of the tasks to complete
                 done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
@@ -415,35 +426,6 @@ class Router:
 # Directory
 # **********************************************************************************************************************
 
-# one master directory per machine the one that successfully listened, others are slave - network mode is peer (like DNS?)
-# if the master closes or dies another can take over (slaves should ask the mast for current state on connection, and
-# upload their own entries too). For now, our topology is all or nothing - no entitlements / permissioning but we need
-# to design authentication in from the ground up. I.e. although everyone will be able to see all public services on the
-# network only authorised agents will be able to use them. DoS will not be preventable. Services may also be local,  or
-# machine wide too and not visible.
-
-# Addressing - machineId, routerId, connectionId
-#  connectionID is assigned by the router , -1 for the directory
-#  routerID is a random number not in use in the IPC address
-#  sending a message to the local directory os the way to get entries - relying on directories to sync themselves
-
-# this could be put into the normal internet style? fred.com/router345/connection23 and use regular DNS for netowrk
-# topology? The difference is that we add use p2p connections and resourse
-
-# to send a message locally is simple - just cross thread
-# to send a message to another process, the router must know if that process is IPC or TCP based
-# if connection doesn't exist then connect to other router
-# thus initially the network will be a star of stars to start with - with peer connections being created on demand
-
-# PUBSUB
-# we can use the pubsub socket to simplify things
-# any service that wants to publish will start a pub socket which will be in the entry - do we keep an IPC pub and a
-# TCP pub?
-
-
-
-
-
 class Directory:
     '''
     The Directory is the place where agents can advertise services they provide. It can be configured to:
@@ -466,8 +448,8 @@ class Directory:
 
         if msg.subject == VLM.REGISTER_ENTRY:
             # OPEN: use this instead of a heartbeat
-            addr, service, params = msg.contents
-            for a, s, p in self._entries:
+            addr, service, params, vnets, perms = msg.contents
+            for a, s, p, _, _ in self._entries:
                 if a == addr and s == service and p == params:
                     await self._conn.send( msg.reply(True) )
                     return
@@ -498,9 +480,8 @@ class Directory:
             await self._conn.send(msg.reply(msg.subject, subject=VLM.DOES_NOT_UNDERSTAND))
 
 
-
 # **********************************************************************************************************************
-# Utilities
+# Serialization
 # **********************************************************************************************************************
 
 def _msgAsBytes(msg):
@@ -534,15 +515,20 @@ def _msgFromBytes(bytes):
     _replyId = int(_replyId) if _replyId else None
     assert schema == '1'
     if toAddrSocketAddr:
-        msg = Msg(Addr(toAddrSocketAddr, toAddrConnId), subject, contents)
+        msg = Msg(Addr(Missing, toAddrSocketAddr, toAddrConnId), subject, contents)
     else:
         msg = Msg(VLM.PUB, subject, contents)
-    msg.fromAddr = Addr(fromAddrSocketAddr, fromAddrConnId)
+    msg.fromAddr = Addr(Missing, fromAddrSocketAddr, fromAddrConnId)
     msg._msgId = _msgId
     msg._replyId = _replyId
     msg.meta = meta
     # OPEN: assert stream at end
     return msg
+
+
+# **********************************************************************************************************************
+# Logging and pretty-printing
+# **********************************************************************************************************************
 
 def _PPMsg(prefix, msg):
     print(f'{prefix + ":":<15} {msg}')

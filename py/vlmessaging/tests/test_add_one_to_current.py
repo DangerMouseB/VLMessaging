@@ -15,9 +15,10 @@ from copy import copy
 from coppertop.utils import Missing
 
 # local imports
-from vlmessaging import Msg, Router, Entry, Directory, VLM
+from vlmessaging import Msg, Router, Entry, Directory, VLM, Addr
 from vlmessaging.utils import with_async_init
-from vlmessaging._utils import _findSingleEntryAddrOfTypeOrExit, _PPMsg
+from vlmessaging._utils import _findSingleEntryAddrOfTypeOrExit
+from vlmessaging._core import _PPMsg
 
 
 @with_async_init
@@ -35,7 +36,7 @@ class GetCurrentAgent:
         entryAdded = False
         self.running = True
         while not entryAdded:
-            msg = Msg(VLM.DIRECTORY, VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None))
+            msg = Msg(Addr(None, None, VLM.DIRECTORY), VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
             entryAdded = await self.conn.send(msg, 1000)
             if entryAdded: entryAdded = entryAdded.contents
 
@@ -69,7 +70,7 @@ class AddOneToCurrentAgent:
         self.addrOfGetCurrentAgent = Missing
         entryAdded = False
         while not entryAdded:
-            msg = Msg(VLM.DIRECTORY, VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None))
+            msg = Msg(Addr(Missing, VLM.LOCAL, VLM.DIRECTORY_CONNECTION_ID), VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
             entryAdded = await self.conn.send(msg, 1000)
             if entryAdded: entryAdded = entryAdded.contents
 
@@ -88,7 +89,7 @@ class AddOneToCurrentAgent:
 
         elif msg.subject == VLM.MSG_NOT_DELIVERED:
             if msg.contents == self.addrOfGetCurrentAgent:
-                await self.conn.send(Msg(VLM.DIRECTORY, VLM.UNREGISTER_ADDR, self.addrOfGetCurrentAgent))
+                await self.conn.send(Msg(Addr(None, None, VLM.DIRECTORY), VLM.UNREGISTER_ADDR, self.addrOfGetCurrentAgent))
                 self.addrOfGetCurrentAgent = Missing   # force a rediscovery next time
 
         else:

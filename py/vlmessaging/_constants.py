@@ -7,21 +7,21 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
-# local imports
-from vlmessaging._structs import Addr
 
+LOCAL = None
 
 PUB = None
-LOCAL = None
-MACHINE = 'MACHINE'
-NETWORKED = 'NETWORKED'
+PROCESS_WIDE = 'PROCESS_WIDE'
+MACHINE_WIDE = 'MACHINE_WIDE'
+NETWORK = 'NETWORK'
 
 DIRECTORY_ADDR = "ipc:///tmp/directory"
 DIRECTORY_CONNECTION_ID = 1
-_AGENT_ADDR_PREFIX = "ipc:///tmp/agent"
+DIRECTORY = 1
+_AGENT_ADDR_PREFIX = "ipc:///tmp/agent_<pid>"
 DIRECTORY_CHECK_INTERVAL = 5000  # seconds
 
-DIRECTORY = Addr(LOCAL, DIRECTORY_CONNECTION_ID)
+# DIRECTORY = Addr(LOCAL, DIRECTORY_CONNECTION_ID)
 
 addr = "tcp://127.0.0.1:13134"
 
