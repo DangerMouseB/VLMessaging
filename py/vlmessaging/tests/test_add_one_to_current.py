@@ -131,9 +131,9 @@ async def _test_add_one_to_current(router):
 
 
 
-def _startAgents(outBox, seqOfFnAndArgs):
+def _startAgents(outBox, routerKwargs, seqOfFnAndArgs):
     async def _():
-        router = Router()
+        router = Router(**routerKwargs)
         agents = []
         try:
             for fn, args in seqOfFnAndArgs:
@@ -155,8 +155,8 @@ def test_add_one_to_current_1():
     outBox = multiprocessing.Queue()
     p = multiprocessing.Process(target=_startAgents, args=(
         outBox,
+        dict(mode=VLM.LOCAL_MODE),
         [
-            (Directory, (VLM.LOCAL,)),
             (AddOneToCurrentAgent, ()),
             (GetCurrentAgent, (500,)),
             (_test_add_one_to_current, ()),
@@ -172,22 +172,22 @@ def test_add_one_to_current_2():
     outBox = multiprocessing.Queue()
     p1 = multiprocessing.Process(target=_startAgents, args=(
         outBox,
+        dict(mode=VLM.MACHINE_MODE, canStartMachineHubDirectory=True),
         [
-            (Directory, (VLM.MACHINE,)),
             (AddOneToCurrentAgent, ()),
         ]
     ))
     p2 = multiprocessing.Process(target=_startAgents, args=(
         outBox,
+        dict(mode=VLM.MACHINE_MODE, canStartMachineHubDirectory=True),
         [
-            (Directory, (VLM.MACHINE,)),
             (GetCurrentAgent, (500,)),
         ]
     ))
     p3 = multiprocessing.Process(target=_startAgents, args=(
         outBox,
+        dict(mode=VLM.MACHINE_MODE, canStartMachineHubDirectory=False),
         [
-            (Directory, (VLM.MACHINE,)),
             (_test_add_one_to_current, ()),
         ]
     ))

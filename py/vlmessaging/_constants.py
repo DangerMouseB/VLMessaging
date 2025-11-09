@@ -8,12 +8,12 @@
 # **********************************************************************************************************************
 
 
-LOCAL = None
+LOCAL_MODE = 'LOCAL_MODE'
+MACHINE_MODE = 'MACHINE_MODE'
+NETWORK_MODE = 'NETWORK_MODE'
+
 
 PUB = None
-PROCESS_WIDE = 'PROCESS_WIDE'
-MACHINE_WIDE = 'MACHINE_WIDE'
-NETWORK = 'NETWORK'
 
 
 DIRECTORY_CHECK_INTERVAL = 5000  # milliseconds

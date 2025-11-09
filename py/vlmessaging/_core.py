@@ -207,34 +207,42 @@ class Router:
         '_routerId', '_connectionIdSeed', '_connectionById', '_inboxById',
         '_refreshInboxTasks',
         '_closingDown', '_hasShutdown',
+        '_directory',
     )
 
-    def __init__(self):
+
+    def __init__(self, mode=VLM.MACHINE_MODE, canStartMachineHubDirectory=True):
         self._sDirectoryListener, self._sDirectory = Missing, Missing
         self._sLocalPeerListener, self._localPipeByAddr, self._sLocalByAddr = Missing, {}, {}
         self._sRemotePeerListener, self._remotePipeByAddr, self._sRemoteByAddr = Missing, {}, Missing
         self._connectionById , self._inboxById = weakref.WeakValueDictionary(), {}
         self._connectionIdSeed, self._refreshInboxTasks = itertools.count(_FIRST_CONNECTION_ID), False
-        asyncio.create_task(self._processInboxes())
         self._closingDown = asyncio.Event()
         self._hasShutdown = asyncio.Event()
         self._routerId = os.getpid()
 
-        # mode
-        # - VLM.LOCAL_MODE
-        #   - starts local directory
-        # - VLM.MACHINE_MODE
-        #   - additionally will attempt to find machine hub directory - every x milliseconds, e.g. 1000
-        #   - will listen for local machine peers
-        # - VLM.NETWORK_MODE - additionally will attempt to find network hub directories
-        #   - will listen for remote machine peers only if an agent advertises itself on a network hub directory
-        # canStartMachineHubDirectory
-        #   - will attempt to start local machine hub directory if none found, which involves listening on
-        #     _MACHINE_HUB_DIRECTORY_ADDR
-        # networkHubDirectoryPorts = [30000, 30001, 30002] - attempts to listen on port every x milliseconds
-        #   - adds network hub directory to machine hub directory and own directory and forwards messages from the port
-        #     to the network hub directory
-        # isIntraMachineRouter - allows forwarding of messages between other machine routers and network routers
+        self._directory = Directory(self)
+        if mode not in (VLM.LOCAL_MODE, VLM.MACHINE_MODE, VLM.NETWORK_MODE):
+            raise ValueError(f'Unknown router mode "{mode}".')
+        if mode in (VLM.MACHINE_MODE, VLM.NETWORK_MODE):
+            # - additionally will attempt to find machine hub directory - every x milliseconds, e.g. 1000
+            # - will listen for local machine peers
+            if canStartMachineHubDirectory:
+                # - will attempt to start local machine hub directory if none found, which involves listening on
+                #   _MACHINE_HUB_DIRECTORY_ADDR
+                raise NotYetImplemented('canStartMachineHubDirectory')
+            raise NotYetImplemented('MACHINE_MODE')
+        if mode == VLM.NETWORK_MODE:
+            # - additionally will attempt to find network hub directories
+            # - will listen for remote machine peers only if an agent advertises itself on a network hub directory
+            # networkHubDirectoryPorts = [30000, 30001, 30002] - attempts to listen on port every x milliseconds
+            #   - adds network hub directory to machine hub directory and own directory and forwards messages from the port
+            #     to the network hub directory
+            # isIntraMachineRouter - allows forwarding of messages between other machine routers and network routers
+            raise NotYetImplemented('NETWORK_MODE')
+
+        asyncio.create_task(self._processInboxes())
+
 
     def newConnection(self, fn=Missing):
         return self._newConnection(next(self._connectionIdSeed), fn)
@@ -343,7 +351,7 @@ class Directory:
 
     __slots__ = ('_conn', '_entries')
 
-    def __init__(self, router, *args, **kwargs):
+    def __init__(self, router):
         if router._connectionById.get(_DIRECTORY_CONNECTION_ID, Missing) is not Missing: raise RuntimeError('A Directory already exists on this router')
         self._conn = router._newConnection(_DIRECTORY_CONNECTION_ID, self.msgArrived)
         self._entries = []
