@@ -14,7 +14,7 @@ import asyncio, multiprocessing, os, inspect, itertools
 from coppertop.utils import Missing
 
 # local imports
-from vlmessaging import Msg, Router, Entry, Directory, VLM, Addr
+from vlmessaging import Msg, Router, Entry, Directory, VLM
 from vlmessaging.utils import with_async_init
 from vlmessaging._utils import _findSingleEntryAddrOfTypeOrExit
 from vlmessaging._core import _PPMsg

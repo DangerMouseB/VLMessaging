@@ -13,7 +13,7 @@ from coppertop.utils import Missing
 
 # local imports
 from vlmessaging import _constants as VLM
-from vlmessaging._core import ExitMessageHandler, Msg, Addr
+from vlmessaging._core import ExitMessageHandler, Msg
 
 
 # work-in-progress utils

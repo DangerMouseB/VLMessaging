@@ -47,9 +47,10 @@ Connection
 
 Directory
 - Entry
-  - Responsibility
-  - Scope
-- VNET
+  - Responsibility (including parameters)
+  - Scope - the VNETs
+  - Perms
+- VNET - Virtual Network - e.g. "fixed-income-trading-game", "local"
 - Hubs
 - Heartbeats
 

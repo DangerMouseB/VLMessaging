@@ -23,6 +23,111 @@ from vlmessaging.utils import with_async_init
 
 
 
+#     # wip
+#
+#     async def tryStartDirectory(self):
+#         # try to start the directory here - potentially in a race with other processes
+#         if self._sDirectoryListener is not Missing: raise ProgrammerError('Already started as a directory')
+#         if self._sDirectory is not Missing: raise ProgrammerError('Already connected to the local directory')
+#         sock = pynng.Pair1(polyamorous=True)
+#         try:
+#             async with trio.open_nursery() as n:
+#                 sock.add_pre_pipe_connect_cb(self.pre_connect_to_directory)
+#                 sock.add_post_pipe_remove_cb(self.post_remove_from_directory)
+#                 sock.listen(_DIRECTORY_ADDR)
+#                 n.start_soon(self.dispatch_from_ipc_socket, sock)
+#                 n.start_soon(self.dispatch_msgs_in_queue, sock)
+#         except Exception as ex:
+#             sock.close()
+#             sock = Missing
+#         if sock is not Missing:
+#             self._sDirectoryListener = sock
+#
+#     async def connectToDirectory(self):
+#         while True:
+#             if self._sDirectory is not Missing:
+#                 # connected
+#                 if len(self._sDirectory.pipes) == 1:
+#                     await trio.sleep(VLM.DIRECTORY_CHECK_INTERVAL / 1000)       # check again later
+#                     continue
+#                 else:
+#                     self._sDirectory.close()
+#                     self._sDirectory = Missing
+#             else:
+#                 # not connected, try to connect
+#                 sock = pynng.Pair1(polyamorous=True)
+#                 try:
+#                     sock.add_pre_pipe_connect_cb(self.pre_connect_to_directory)
+#                     sock.add_post_pipe_remove_cb(self.post_remove_from_directory)
+#                     sock.dial(_DIRECTORY_ADDR)
+#                     self._sDirectory = sock
+#                     print("Connected to directory.")
+#                     async with trio.open_nursery() as n:
+#                         n.start_soon(self.dispatch_from_ipc_socket, sock)
+#                         n.start_soon(self.dispatch_msgs_in_queue, sock)
+#                         while True:
+#                             await trio.sleep(5)
+#                             # Check if connection is still alive
+#                             if not sock.pipes:
+#                                 print("Lost connection to directory, reconnecting...")
+#                                 break
+#                 except Exception as ex:
+#                     print(f"Failed to connect to directory: {ex}")
+#                 finally:
+#                     sock.close()
+#                     self._sDirectory = Missing
+#                     await trio.sleep(5)  # Wait before retrying
+#
+#     async def startPeerListener(self, addr):
+#         self.sPeerListener = pynng.Pair1(polyamorous=True)
+#         async with trio.open_nursery() as n:
+#
+#             self.sListen.add_pre_pipe_connect_cb(self.pre_connect_cb)
+#             self.sListen.add_post_pipe_remove_cb(self.post_remove_cb)
+#             self.sListen.listen(addr)
+#             n.start_soon(self.dispatch_from_ipc_socket, self.sListen)
+#             n.start_soon(self.dispatch_msgs_in_queue, self.sListen)
+#
+#     def pre_connect_peer(self, pipe):
+#         print(f"~~~~got connection from {pipe.remote_address}")
+#
+#     def post_remove_peer(self, pipe):
+#         print(f"~~~~goodbye for now from {pipe.remote_address}")
+#
+#     def pre_connect_to_directory(self, pipe):
+#         print(f"~~~~got connection from {pipe.remote_address}")
+#
+#     def post_remove_from_directory(self, pipe):
+#         print(f"~~~~goodbye for now from {pipe.remote_address}")
+#
+#     async def start_agent(self, addr):
+#         with pynng.Pair1(polyamorous=True) as sock:
+#             async with trio.open_nursery() as n:
+#                 sock.dial(addr)
+#                 sock.fred = False
+#                 n.start_soon(self.dispatch_from_ipc_socket, sock)
+#                 n.start_soon(self.dispatch_msgs_in_queue, sock)
+#
+#     async def dispatch_from_ipc_socket(self, sock):
+#         while True:
+#             msg = await sock.arecv_msg()
+#             # dispatch
+#             source_addr = str(msg.pipe.remote_address)
+#             content = msg.bytes.decode()
+#             print(f'{source_addr} says: {content}')
+#             if sock.fred:
+#                 await msg.pipe.asend(f'got {content}'.encode())
+#
+#     async def dispatch_msgs_in_queue(self, sock):
+#         while True:
+#             # wait for msgs to arrive in queue here
+#             stuff = await run_sync(input)  # , cancellable=True)
+#             # dispatch - inproc or ipc
+#             for pipe in sock.pipes:
+#                 await pipe.asend(stuff.encode())
+
+
+
 @with_async_init
 class Router:
     __slots__ = ('_sock', 'addr')

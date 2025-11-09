@@ -7,5 +7,5 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
-from vlmessaging._core import Connection, Router, Directory, ExitMessageHandler, Addr, Msg, Entry, Perm
+from vlmessaging._core import Connection, Router, Directory, Addr, Msg, Entry, Perm, ExitMessageHandler
 from vlmessaging import _constants as VLM

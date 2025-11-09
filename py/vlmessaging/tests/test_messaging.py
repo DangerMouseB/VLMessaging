@@ -16,7 +16,7 @@ from vlmessaging._core import _msgFromBytes, _msgAsBytes
 
 
 def test_serialise():
-    msg = Msg(Addr(None, None, 3), 'TEST', dict(hello='world'))
+    msg = Msg(Addr(None, 1, 3), 'TEST', dict(hello='world'))
     msg.fromAddr = Addr(None, 1, 2)
     msg._msgId = 1
     bytes = _msgAsBytes(msg)

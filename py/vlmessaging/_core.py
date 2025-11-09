@@ -9,7 +9,7 @@
 
 
 # Python imports
-import itertools, logging, pynng, asyncio, weakref, collections, io
+import itertools, logging, pynng, asyncio, weakref, collections, io, os
 from amazon.ion import simpleion
 
 # coppertop imports
@@ -22,11 +22,13 @@ from vlmessaging import _constants as VLM
 _logger = logging.getLogger(__name__)
 
 
-
-_DIRECTORY_ADDR = "ipc:///tmp/directory"
 _DIRECTORY_CONNECTION_ID = 1
-_AGENT_ADDR_PREFIX = "ipc:///tmp/agent_<pid>"
-_addr = "tcp://127.0.0.1:13134"
+_FIRST_CONNECTION_ID = _DIRECTORY_CONNECTION_ID + 1
+
+_MACHINE_HUB_DIRECTORY_ADDR = "ipc:///tmp/agent_0"
+
+# _AGENT_ADDR_PREFIX = "ipc:///tmp/agent_<pid>"
+# X_MACHINE_LISTEN_PORT = "tcp://127.0.0.1:13134"
 
 
 
@@ -98,7 +100,7 @@ class Connection:
         self._msgArrivedFn = fn
         self._futureAndSubjectsByReplyId = {}
         self._msgIdSeed = itertools.count(1)
-        self.addr = Addr(Missing, VLM.LOCAL, connectionId)
+        self.addr = Addr(None, router._routerId, connectionId)
 
     async def _deliver(self, msg):
         if (futAndSubjects := self._futureAndSubjectsByReplyId.pop(msg._replyId, Missing)) is not Missing:
@@ -106,7 +108,7 @@ class Connection:
             if msg.subject in subjects:
                 # we have a future waiting for this reply
                 if fut.done():
-                    # is this possible?
+                    # is this possible? OPEN: log a warning that the apparently impossible has happened
                     pass
                 else:
                     # we have the reply in time so pass it to the future
@@ -150,21 +152,6 @@ class Connection:
                 # no handler so reply it wasn't delivered
                 _PPMsg(f'undeliverable', msg._msgId)
                 await self.send(msg.reply(msg.toAddr, subject=VLM.MSG_NOT_DELIVERED))
-
-
-    # def _send(self, msg, timeout=Missing) -> Msg | Missing:
-    #     # if timeout is Missing send asynchronously
-    #     if msg.toAddr == VLM.PUB:
-    #         # broadcast on the connection's pubsub socket
-    #         raise NotYetImplemented()
-    #     else:
-    #         if msg.toAddr.socketAddr == DIRECTORY:??????
-    #             if not self._localDirSocket:
-    #                 # try connecting to local dir
-    #                 # if can't be dialled try creating local directory
-    #                 raise NotYetImplemented()
-    #             raise NotYetImplemented()
-    #         raise NotYetImplemented()
 
     async def send(self, msg, timeout=Missing, additional_subjects=Missing):
         # return reply, Missing if timeout exceeded or None if no timeout
@@ -217,9 +204,8 @@ class Router:
         '_sDirectoryListener', '_sDirectory',                           # local directory connections
         '_sLocalPeerListener', '_localPipeByAddr', '_sLocalByAddr',     # local peer connections
         '_sRemotePeerListener', '_remotePipeByAddr', '_sRemoteByAddr',  # remote peer connections
-        '_connectionById', '_inboxById',
-        '_connectionIdSeed', '_refreshInboxTasks',
-        '_entries',
+        '_routerId', '_connectionIdSeed', '_connectionById', '_inboxById',
+        '_refreshInboxTasks',
         '_closingDown', '_hasShutdown',
     )
 
@@ -228,11 +214,27 @@ class Router:
         self._sLocalPeerListener, self._localPipeByAddr, self._sLocalByAddr = Missing, {}, {}
         self._sRemotePeerListener, self._remotePipeByAddr, self._sRemoteByAddr = Missing, {}, Missing
         self._connectionById , self._inboxById = weakref.WeakValueDictionary(), {}
-        self._connectionIdSeed, self._refreshInboxTasks = itertools.count(_DIRECTORY_CONNECTION_ID + 1), False
-        self._entries = {}
+        self._connectionIdSeed, self._refreshInboxTasks = itertools.count(_FIRST_CONNECTION_ID), False
         asyncio.create_task(self._processInboxes())
         self._closingDown = asyncio.Event()
         self._hasShutdown = asyncio.Event()
+        self._routerId = os.getpid()
+
+        # mode
+        # - VLM.LOCAL_MODE
+        #   - starts local directory
+        # - VLM.MACHINE_MODE
+        #   - additionally will attempt to find machine hub directory - every x milliseconds, e.g. 1000
+        #   - will listen for local machine peers
+        # - VLM.NETWORK_MODE - additionally will attempt to find network hub directories
+        #   - will listen for remote machine peers only if an agent advertises itself on a network hub directory
+        # canStartMachineHubDirectory
+        #   - will attempt to start local machine hub directory if none found, which involves listening on
+        #     _MACHINE_HUB_DIRECTORY_ADDR
+        # networkHubDirectoryPorts = [30000, 30001, 30002] - attempts to listen on port every x milliseconds
+        #   - adds network hub directory to machine hub directory and own directory and forwards messages from the port
+        #     to the network hub directory
+        # isIntraMachineRouter - allows forwarding of messages between other machine routers and network routers
 
     def newConnection(self, fn=Missing):
         return self._newConnection(next(self._connectionIdSeed), fn)
@@ -246,7 +248,7 @@ class Router:
         return c
 
     def _getDirectoryAddr(self):
-        return Addr(None, None, _DIRECTORY_CONNECTION_ID)
+        return Addr(None, self._routerId, _DIRECTORY_CONNECTION_ID)
 
     async def shutdown(self):
         self._connectionById = {}
@@ -263,7 +265,7 @@ class Router:
 
     def _route(self, msg):
         machineId, routerId, connectionId = msg.toAddr
-        if routerId == VLM.LOCAL:
+        if routerId == self._routerId:
             conn = self._connectionById.get(connectionId, Missing)
             if conn:
                 _PPMsg(f'route', msg._msgId)
@@ -280,7 +282,8 @@ class Router:
                         _PPMsg(f'unroutable', msg._msgId)
                         inbox.put_nowait(reply)
         else:
-            raise NotYetImplemented('inter-router routing')
+            # OPEN: handle PUB
+            raise NotYetImplemented(f'inter-router routing to router {routerId}')
 
     async def _processInboxes(self):
         # We keep a list of tasks waiting for messages to arrive in each connection's inbox. To prevent starvation we
@@ -332,130 +335,16 @@ class Router:
 
 
 
-    # wip
-
-    async def tryStartDirectory(self):
-        # try to start the directory here - potentially in a race with other processes
-        if self._sDirectoryListener is not Missing: raise ProgrammerError('Already started as a directory')
-        if self._sDirectory is not Missing: raise ProgrammerError('Already connected to the local directory')
-        sock = pynng.Pair1(polyamorous=True)
-        try:
-            async with trio.open_nursery() as n:
-                sock.add_pre_pipe_connect_cb(self.pre_connect_to_directory)
-                sock.add_post_pipe_remove_cb(self.post_remove_from_directory)
-                sock.listen(_DIRECTORY_ADDR)
-                n.start_soon(self.dispatch_from_ipc_socket, sock)
-                n.start_soon(self.dispatch_msgs_in_queue, sock)
-        except Exception as ex:
-            sock.close()
-            sock = Missing
-        if sock is not Missing:
-            self._sDirectoryListener = sock
-
-    async def connectToDirectory(self):
-        while True:
-            if self._sDirectory is not Missing:
-                # connected
-                if len(self._sDirectory.pipes) == 1:
-                    await trio.sleep(VLM.DIRECTORY_CHECK_INTERVAL / 1000)       # check again later
-                    continue
-                else:
-                    self._sDirectory.close()
-                    self._sDirectory = Missing
-            else:
-                # not connected, try to connect
-                sock = pynng.Pair1(polyamorous=True)
-                try:
-                    sock.add_pre_pipe_connect_cb(self.pre_connect_to_directory)
-                    sock.add_post_pipe_remove_cb(self.post_remove_from_directory)
-                    sock.dial(_DIRECTORY_ADDR)
-                    self._sDirectory = sock
-                    print("Connected to directory.")
-                    async with trio.open_nursery() as n:
-                        n.start_soon(self.dispatch_from_ipc_socket, sock)
-                        n.start_soon(self.dispatch_msgs_in_queue, sock)
-                        while True:
-                            await trio.sleep(5)
-                            # Check if connection is still alive
-                            if not sock.pipes:
-                                print("Lost connection to directory, reconnecting...")
-                                break
-                except Exception as ex:
-                    print(f"Failed to connect to directory: {ex}")
-                finally:
-                    sock.close()
-                    self._sDirectory = Missing
-                    await trio.sleep(5)  # Wait before retrying
-
-    async def startPeerListener(self, addr):
-        self.sPeerListener = pynng.Pair1(polyamorous=True)
-        async with trio.open_nursery() as n:
-
-            self.sListen.add_pre_pipe_connect_cb(self.pre_connect_cb)
-            self.sListen.add_post_pipe_remove_cb(self.post_remove_cb)
-            self.sListen.listen(addr)
-            n.start_soon(self.dispatch_from_ipc_socket, self.sListen)
-            n.start_soon(self.dispatch_msgs_in_queue, self.sListen)
-
-    def pre_connect_peer(self, pipe):
-        print(f"~~~~got connection from {pipe.remote_address}")
-
-    def post_remove_peer(self, pipe):
-        print(f"~~~~goodbye for now from {pipe.remote_address}")
-
-    def pre_connect_to_directory(self, pipe):
-        print(f"~~~~got connection from {pipe.remote_address}")
-
-    def post_remove_from_directory(self, pipe):
-        print(f"~~~~goodbye for now from {pipe.remote_address}")
-
-    async def start_agent(self, addr):
-        with pynng.Pair1(polyamorous=True) as sock:
-            async with trio.open_nursery() as n:
-                sock.dial(addr)
-                sock.fred = False
-                n.start_soon(self.dispatch_from_ipc_socket, sock)
-                n.start_soon(self.dispatch_msgs_in_queue, sock)
-
-    async def dispatch_from_ipc_socket(self, sock):
-        while True:
-            msg = await sock.arecv_msg()
-            # dispatch
-            source_addr = str(msg.pipe.remote_address)
-            content = msg.bytes.decode()
-            print(f'{source_addr} says: {content}')
-            if sock.fred:
-                await msg.pipe.asend(f'got {content}'.encode())
-
-    async def dispatch_msgs_in_queue(self, sock):
-        while True:
-            # wait for msgs to arrive in queue here
-            stuff = await run_sync(input)  # , cancellable=True)
-            # dispatch - inproc or ipc
-            for pipe in sock.pipes:
-                await pipe.asend(stuff.encode())
-
-
-
 # **********************************************************************************************************************
 # Directory
 # **********************************************************************************************************************
 
 class Directory:
-    '''
-    The Directory is the place where agents can advertise services they provide. It can be configured to:
-    - act alone (LOCAL mode) without cooperation with other directories,
-    - in cooperation with other Directories on a local machine (MACHINE mode),
-    - or with other Directories accessible on the netweork (NETWORK mode).
-
-    Agents can register and unregister their services here, and connections can query for available services.
-    '''
 
     __slots__ = ('_conn', '_entries')
 
-    def __init__(self, router, mode=VLM.LOCAL):
-        if router._connectionById.get(_DIRECTORY_CONNECTION_ID, Missing) is not Missing:
-            raise RuntimeError('A Directory already exists on this router')
+    def __init__(self, router, *args, **kwargs):
+        if router._connectionById.get(_DIRECTORY_CONNECTION_ID, Missing) is not Missing: raise RuntimeError('A Directory already exists on this router')
         self._conn = router._newConnection(_DIRECTORY_CONNECTION_ID, self.msgArrived)
         self._entries = []
 
@@ -530,10 +419,10 @@ def _msgFromBytes(bytes):
     _replyId = int(_replyId) if _replyId else None
     assert schema == '1'
     if toAddrSocketAddr:
-        msg = Msg(Addr(Missing, toAddrSocketAddr, toAddrConnId), subject, contents)
+        msg = Msg(Addr(None, toAddrSocketAddr, toAddrConnId), subject, contents)
     else:
         msg = Msg(VLM.PUB, subject, contents)
-    msg.fromAddr = Addr(Missing, fromAddrSocketAddr, fromAddrConnId)
+    msg.fromAddr = Addr(None, fromAddrSocketAddr, fromAddrConnId)
     msg._msgId = _msgId
     msg._replyId = _replyId
     msg.meta = meta
