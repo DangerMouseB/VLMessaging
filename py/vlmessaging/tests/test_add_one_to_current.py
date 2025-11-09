@@ -9,7 +9,6 @@
 
 # Python imports
 import asyncio, multiprocessing, os, inspect, itertools
-from copy import copy
 
 # 3rd party imports
 from coppertop.utils import Missing
@@ -36,7 +35,7 @@ class GetCurrentAgent:
         entryAdded = False
         self.running = True
         while not entryAdded:
-            msg = Msg(Addr(None, None, VLM.DIRECTORY), VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
+            msg = Msg(self.conn.getDirectoryAddr(), VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
             entryAdded = await self.conn.send(msg, 1000)
             if entryAdded: entryAdded = entryAdded.contents
 
@@ -70,7 +69,7 @@ class AddOneToCurrentAgent:
         self.addrOfGetCurrentAgent = Missing
         entryAdded = False
         while not entryAdded:
-            msg = Msg(Addr(Missing, VLM.LOCAL, VLM.DIRECTORY_CONNECTION_ID), VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
+            msg = Msg(self.conn.getDirectoryAddr(), VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
             entryAdded = await self.conn.send(msg, 1000)
             if entryAdded: entryAdded = entryAdded.contents
 
@@ -89,7 +88,7 @@ class AddOneToCurrentAgent:
 
         elif msg.subject == VLM.MSG_NOT_DELIVERED:
             if msg.contents == self.addrOfGetCurrentAgent:
-                await self.conn.send(Msg(Addr(None, None, VLM.DIRECTORY), VLM.UNREGISTER_ADDR, self.addrOfGetCurrentAgent))
+                await self.conn.send(Msg(self.conn.getDirectoryAddr(), VLM.UNREGISTER_ADDR, self.addrOfGetCurrentAgent))
                 self.addrOfGetCurrentAgent = Missing   # force a rediscovery next time
 
         else:

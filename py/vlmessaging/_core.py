@@ -22,6 +22,15 @@ from vlmessaging import _constants as VLM
 _logger = logging.getLogger(__name__)
 
 
+
+_DIRECTORY_ADDR = "ipc:///tmp/directory"
+_DIRECTORY_CONNECTION_ID = 1
+_AGENT_ADDR_PREFIX = "ipc:///tmp/agent_<pid>"
+_addr = "tcp://127.0.0.1:13134"
+
+
+
+
 class ExitMessageHandler(Exception): pass
 
 
@@ -149,7 +158,7 @@ class Connection:
     #         # broadcast on the connection's pubsub socket
     #         raise NotYetImplemented()
     #     else:
-    #         if msg.toAddr.socketAddr == DIRECTORY:
+    #         if msg.toAddr.socketAddr == DIRECTORY:??????
     #             if not self._localDirSocket:
     #                 # try connecting to local dir
     #                 # if can't be dialled try creating local directory
@@ -193,6 +202,9 @@ class Connection:
         # tell router
         self._router._dropInboxFor(self.addr.connectionId)
 
+    def getDirectoryAddr(self):
+        return self._router._getDirectoryAddr()
+
 
 
 # **********************************************************************************************************************
@@ -216,7 +228,7 @@ class Router:
         self._sLocalPeerListener, self._localPipeByAddr, self._sLocalByAddr = Missing, {}, {}
         self._sRemotePeerListener, self._remotePipeByAddr, self._sRemoteByAddr = Missing, {}, Missing
         self._connectionById , self._inboxById = weakref.WeakValueDictionary(), {}
-        self._connectionIdSeed, self._refreshInboxTasks = itertools.count(VLM.DIRECTORY_CONNECTION_ID + 1), False
+        self._connectionIdSeed, self._refreshInboxTasks = itertools.count(_DIRECTORY_CONNECTION_ID + 1), False
         self._entries = {}
         asyncio.create_task(self._processInboxes())
         self._closingDown = asyncio.Event()
@@ -232,6 +244,9 @@ class Router:
         self._inboxById[connectionId] = asyncio.Queue()
         self._refreshInboxTasks = True
         return c
+
+    def _getDirectoryAddr(self):
+        return Addr(None, None, _DIRECTORY_CONNECTION_ID)
 
     async def shutdown(self):
         self._connectionById = {}
@@ -328,7 +343,7 @@ class Router:
             async with trio.open_nursery() as n:
                 sock.add_pre_pipe_connect_cb(self.pre_connect_to_directory)
                 sock.add_post_pipe_remove_cb(self.post_remove_from_directory)
-                sock.listen(VLM.DIRECTORY_ADDR)
+                sock.listen(_DIRECTORY_ADDR)
                 n.start_soon(self.dispatch_from_ipc_socket, sock)
                 n.start_soon(self.dispatch_msgs_in_queue, sock)
         except Exception as ex:
@@ -353,7 +368,7 @@ class Router:
                 try:
                     sock.add_pre_pipe_connect_cb(self.pre_connect_to_directory)
                     sock.add_post_pipe_remove_cb(self.post_remove_from_directory)
-                    sock.dial(VLM.DIRECTORY_ADDR)
+                    sock.dial(_DIRECTORY_ADDR)
                     self._sDirectory = sock
                     print("Connected to directory.")
                     async with trio.open_nursery() as n:
@@ -439,9 +454,9 @@ class Directory:
     __slots__ = ('_conn', '_entries')
 
     def __init__(self, router, mode=VLM.LOCAL):
-        if router._connectionById.get(VLM.DIRECTORY_CONNECTION_ID, Missing) is not Missing:
+        if router._connectionById.get(_DIRECTORY_CONNECTION_ID, Missing) is not Missing:
             raise RuntimeError('A Directory already exists on this router')
-        self._conn = router._newConnection(VLM.DIRECTORY_CONNECTION_ID, self.msgArrived)
+        self._conn = router._newConnection(_DIRECTORY_CONNECTION_ID, self.msgArrived)
         self._entries = []
 
     async def msgArrived(self, msg):
