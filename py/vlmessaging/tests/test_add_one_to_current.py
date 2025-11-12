@@ -28,6 +28,7 @@ class GetCurrentAgent:
     ENTRY_TYPE = 'GetCurrentAgent'
     GET_CURRENT = 'GET_CURRENT'
     KILL = 'KILL'
+    SHUTDOWN = 'SHUTDOWN'
 
     async def __init__(self, router, wait):
         self.conn = router.newConnection(self.msgArrived)
@@ -52,6 +53,9 @@ class GetCurrentAgent:
             await self.conn.send( msg.reply(None) )
             self.conn = None
 
+        elif msg.subject == self.SHUTDOWN:
+            await self.conn.shutdown()
+
         else:
             return [VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
 
@@ -63,6 +67,7 @@ class AddOneToCurrentAgent:
 
     ENTRY_TYPE = 'AddOneToCurrentAgent'
     ADD_ONE_TO_CURRENT = 'ADD_ONE_TO_CURRENT'
+    SHUTDOWN = 'SHUTDOWN'
 
     async def __init__(self, router):
         self.conn = router.newConnection(self.msgArrived)
@@ -90,6 +95,9 @@ class AddOneToCurrentAgent:
             if msg.contents == self.addrOfGetCurrentAgent:
                 await self.conn.send(Msg(self.conn.getDirectoryAddr(), VLM.UNREGISTER_ADDR, self.addrOfGetCurrentAgent))
                 self.addrOfGetCurrentAgent = Missing   # force a rediscovery next time
+
+        elif msg.subject == self.SHUTDOWN:
+            await self.conn.shutdown()
 
         else:
             return [VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
@@ -126,32 +134,56 @@ async def _test_add_one_to_current(router):
     _PPMsg(f'Got', f'{res.subject} = {res.contents}')
     assert res.contents == 42
 
-    # shutdown the test harness
+    # shutdown the GetCurrentAgent's router
+    getCurrentAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, GetCurrentAgent.ENTRY_TYPE, 5000, errMsg=Missing)
+    if getCurrentAgentAddr is not Missing:
+        msg = Msg(getCurrentAgentAddr, GetCurrentAgent.SHUTDOWN, None)
+        res = await conn.send(msg, 5000)
+        assert res is Missing
+
+    # shutdown the addOneAgentAddr's router
+    msg = Msg(addOneAgentAddr, AddOneToCurrentAgent.SHUTDOWN, None)
+    res = await conn.send(msg, 5000)
+    assert res is Missing
+
+    # shutdown this test's router
     await router.shutdown()
 
 
 
+async def _startRouterWithAgents(routerKwargs, seqOfFnAndArgs):
+    router = Router(**routerKwargs)
+    agents = []
+    for fn, args in seqOfFnAndArgs:
+        agent = fn(router, *args)
+        if inspect.iscoroutine(agent):
+            agent = await agent
+        agents.append(agent)
+    # await router.shutdown()
+    await router.hasShutdown()
+
+
 def _startAgents(outBox, routerKwargs, seqOfFnAndArgs):
     async def _():
-        router = Router(**routerKwargs)
-        agents = []
         try:
-            for fn, args in seqOfFnAndArgs:
-                agent = fn(router, *args)
-                if inspect.iscoroutine(agent):
-                    agent = await agent
-                agents.append(agent)
+            await _startRouterWithAgents(routerKwargs, seqOfFnAndArgs)
+            outBox.put((os.getpid(), True))
         except AssertionError as e:
             outBox.put((os.getpid(), False))
             raise e
-        finally:
-            await router.shutdown()
-        await router.hasShutdown()
-        outBox.put((os.getpid(), True))
     asyncio.run(_())
 
 
-def test_add_one_to_current_1():
+def start_services():
+    asyncio.run(_startRouterWithAgents(
+        dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=True),
+        [
+            (AddOneToCurrentAgent, ()),
+            (GetCurrentAgent, (500,)),
+        ]
+    ))
+
+def test_add_one_to_current_1_process():
     outBox = multiprocessing.Queue()
     p = multiprocessing.Process(target=_startAgents, args=(
         outBox,
@@ -168,25 +200,26 @@ def test_add_one_to_current_1():
     assert res[1], 'test_add_one_to_current_1 failed'
 
 
-def test_add_one_to_current_2():
+def test_add_one_to_current_3_processes():
     outBox = multiprocessing.Queue()
     p1 = multiprocessing.Process(target=_startAgents, args=(
         outBox,
-        dict(mode=VLM.MACHINE_MODE, canStartMachineHubDirectory=True),
+        dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=True),
+        # {'listen': 'localhost:30000', 'connect': [VLM.MACHINE_WIDE]},
         [
             (AddOneToCurrentAgent, ()),
         ]
     ))
     p2 = multiprocessing.Process(target=_startAgents, args=(
         outBox,
-        dict(mode=VLM.MACHINE_MODE, canStartMachineHubDirectory=True),
+        dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=True),
         [
             (GetCurrentAgent, (500,)),
         ]
     ))
     p3 = multiprocessing.Process(target=_startAgents, args=(
         outBox,
-        dict(mode=VLM.MACHINE_MODE, canStartMachineHubDirectory=False),
+        dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=False),
         [
             (_test_add_one_to_current, ()),
         ]
@@ -218,7 +251,8 @@ class CountFailures(object):
 
 if __name__ == "__main__":
     failures = itertools.count()
-    with CountFailures(failures): test_add_one_to_current_1()
-    # with CountFailures(failures): test_add_one_to_current_2()
+    with CountFailures(failures): test_add_one_to_current_1_process()
+    # start_services()
+    # with CountFailures(failures): test_add_one_to_current_3_processes()
     print()
     print('failed' if failures.__reduce__()[1][0] else 'passed')
