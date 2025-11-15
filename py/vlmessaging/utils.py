@@ -71,3 +71,14 @@ class Timer:
 
     def __repr__(self) -> str:
         return f"<timer expired={not not self}>"
+
+
+class CountFailures(object):
+    def __init__(self, counter):
+        self.counter = counter
+    def __enter__(self):
+        return None
+    def __exit__(self, type, value, traceback):
+        if value is not None: next(self.counter)
+        return True
+

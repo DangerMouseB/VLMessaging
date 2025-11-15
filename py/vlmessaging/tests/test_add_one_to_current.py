@@ -23,10 +23,18 @@ from coppertop.utils import Missing
 
 # local imports
 from vlmessaging import Msg, Router, Entry, VLM, ExitMessageHandler
-from vlmessaging.utils import with_async_init, Timer, until
+from vlmessaging.utils import with_async_init, Timer, until, CountFailures
 from vlmessaging._utils import _findSingleEntryAddrOfTypeOrExit
 from vlmessaging._core import _PPMsg
 
+
+
+# **********************************************************************************************************************
+# GetCurrentAgent
+# This agent answers 41 to the subject GET_CURRENT, with an initial delay that reduces by 100ms each time. This is to
+# show that AddOneToCurrentAgent copes with delays and timeouts. It also responds to KILL by stopping itself to show
+# that the AddOneToCurrentAgent can cope with failure and rediscover another GetCurrentAgent.
+# **********************************************************************************************************************
 
 @with_async_init
 class GetCurrentAgent:
@@ -36,7 +44,6 @@ class GetCurrentAgent:
     ENTRY_TYPE = 'GetCurrentAgent'
     GET_CURRENT = 'GET_CURRENT'
     KILL = 'KILL'
-    SHUTDOWN = 'SHUTDOWN'
 
     async def __init__(self, router, delay):
         self.conn = router.newConnection(self.msgArrived)
@@ -61,12 +68,17 @@ class GetCurrentAgent:
             await self.conn.send( msg.reply(None) )
             self.conn = None
 
-        elif msg.subject == self.SHUTDOWN:
-            await self.conn.shutdown()
-
         else:
-            return [VLM.HANDLE_PING, VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
+            return [VLM.HANDLE_PING, VLM.HANDLE_SHUTDOWN, VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
 
+
+
+# **********************************************************************************************************************
+# AddOneToCurrentAgent
+# When ADD_ONE_TO_CURRENT arrives this agent finds a GetCurrentAgent, and keeps asking it GET_CURRENT until it answers.
+# It then adds 1 to the answer and returns the result to the sender. The discovery loop shows how VLMessaging copes with
+# agent failure.
+# **********************************************************************************************************************
 
 @with_async_init
 class AddOneToCurrentAgent:
@@ -75,7 +87,6 @@ class AddOneToCurrentAgent:
 
     ENTRY_TYPE = 'AddOneToCurrentAgent'
     ADD_ONE_TO_CURRENT = 'ADD_ONE_TO_CURRENT'
-    SHUTDOWN = 'SHUTDOWN'
 
     async def __init__(self, router):
         self.conn = router.newConnection(self.msgArrived)
@@ -104,13 +115,16 @@ class AddOneToCurrentAgent:
                 await self.conn.send(Msg(self.conn.getDirectoryAddr(), VLM.UNREGISTER_ADDR, self.addrOfGetCurrentAgent))
                 self.addrOfGetCurrentAgent = Missing   # force a rediscovery next time
 
-        elif msg.subject == self.SHUTDOWN:
-            await self.conn.shutdown()
-
         else:
-            return [VLM.HANDLE_PING, VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
+            return [VLM.HANDLE_PING, VLM.HANDLE_SHUTDOWN, VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
 
 
+
+# **********************************************************************************************************************
+# The _test_add_one_to_current script - finds an AddOneToCurrentAgent, requests ADD_ONE_TO_CURRENT, kills off the
+# GetCurrentAgent, starts a new GetCurrentAgent and asks the AddOneToCurrentAgent to again ADD_ONE_TO_CURRENT to show
+# coping with agent failure. Shuts down all agents and its router at the end of the test.
+# **********************************************************************************************************************
 
 async def _test_add_one_to_current(router):
     conn = router.newConnection()
@@ -153,12 +167,12 @@ async def _test_add_one_to_current(router):
     # shutdown the GetCurrentAgent's router
     getCurrentAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, GetCurrentAgent.ENTRY_TYPE, 5000, errMsg=Missing)
     if getCurrentAgentAddr is not Missing:
-        msg = Msg(getCurrentAgentAddr, GetCurrentAgent.SHUTDOWN, None)
+        msg = Msg(getCurrentAgentAddr, VLM.SHUTDOWN, None)
         res = await conn.send(msg, 5000)
         assert res is Missing
 
     # shutdown the addOneAgentAddr's router
-    msg = Msg(addOneAgentAddr, AddOneToCurrentAgent.SHUTDOWN, None)
+    msg = Msg(addOneAgentAddr, VLM.SHUTDOWN, None)
     res = await conn.send(msg, 5000)
     assert res is Missing
 
@@ -166,6 +180,10 @@ async def _test_add_one_to_current(router):
     await router.shutdown()
 
 
+
+# **********************************************************************************************************************
+# Functions to help configure the various test scenarios
+# **********************************************************************************************************************
 
 async def _startRouterWithAgents(routerKwargs, seqOfFnAndArgs):
     router = Router(**routerKwargs)
@@ -213,6 +231,11 @@ def _start_services_3_routers_1_loop():
         await until(router1.hasShutdown and router2.hasShutdown and router3.hasShutdown, timeout=10000)
     asyncio.run(_())
 
+
+
+# **********************************************************************************************************************
+# tests
+# **********************************************************************************************************************
 
 def test_add_one_to_current_1_process():
     outBox = multiprocessing.Queue()
@@ -269,15 +292,6 @@ def test_add_one_to_current_3_processes():
             failures.append(nameByPid[res[0]])
     assert not failures, f'test_add_one_to_current_2 failed for {", ".join(failures)}'
 
-
-class CountFailures(object):
-    def __init__(self, counter):
-        self.counter = counter
-    def __enter__(self):
-        return None
-    def __exit__(self, type, value, traceback):
-        if value is not None: next(self.counter)
-        return True
 
 
 if __name__ == "__main__":

@@ -140,6 +140,10 @@ class Connection:
                             if msg.subject == VLM.PING and not msg.isReply:
                                 await self.send(msg.reply(None))
                                 handled = True
+                        elif instruction == VLM.HANDLE_SHUTDOWN:
+                            if msg.subject == VLM.SHUTDOWN and not msg.isReply:
+                                await self.shutdown()
+                                handled = True
                         elif instruction == VLM.HANDLE_DOES_NOT_UNDERSTAND:
                             if msg.subject == VLM.DOES_NOT_UNDERSTAND:
                                 handled = True
@@ -399,7 +403,7 @@ class Router:
         self._isShuttingDown.set()
         await asyncio.sleep(0.01)  # do this here so the client doesn't have to - annoyingly we can't loop until done
         self._hasShutdown.set()
-       
+
     @property
     def hasShutdown(self):
         return self._hasShutdown
@@ -428,7 +432,7 @@ class Router:
                             _PPMsg(f'unroutable', msg._msgId)
                             inbox.put_nowait(reply)
             else:
-                # OPEN: handle PUB
+                # OPEN: handle PUB?
                 ipcRouterPipe = self._ipcPipeByRouterId.get(routerId, Missing)
                 if ipcRouterPipe is Missing:
                     # incoming connections are on the pipe of the sIpcRouterListener
@@ -610,12 +614,12 @@ def _msgAsBytes(msg):
     simpleion.dump('1', bytes, binary=True)
     simpleion.dump(msg.fromAddr.routerId, bytes, binary=True)
     simpleion.dump(msg.fromAddr.connectionId, bytes, binary=True)
-    if msg.toAddr == VLM.PUB:
-        simpleion.dump(None, bytes, binary=True)
-        simpleion.dump(None, bytes, binary=True)
-    else:
-        simpleion.dump(msg.toAddr.routerId, bytes, binary=True)
-        simpleion.dump(msg.toAddr.connectionId, bytes, binary=True)
+    # if msg.toAddr == VLM.PUB:
+    #     simpleion.dump(None, bytes, binary=True)
+    #     simpleion.dump(None, bytes, binary=True)
+    # else:
+    simpleion.dump(msg.toAddr.routerId, bytes, binary=True)
+    simpleion.dump(msg.toAddr.connectionId, bytes, binary=True)
     simpleion.dump(msg.subject, bytes, binary=True)
     simpleion.dump(msg._msgId, bytes, binary=True)
     simpleion.dump(msg._replyId, bytes, binary=True)
@@ -638,7 +642,8 @@ def _msgFromBytes(bytes):
     if toAddrSocketAddr:
         msg = Msg(Addr(None, toAddrSocketAddr, toAddrConnId), subject, contents)
     else:
-        msg = Msg(VLM.PUB, subject, contents)
+        raise NotYetImplemented('PUB')
+        # msg = Msg(VLM.PUB, subject, contents)
     msg.fromAddr = Addr(None, fromAddrSocketAddr, fromAddrConnId)
     msg._msgId = _msgId
     msg._replyId = _replyId
