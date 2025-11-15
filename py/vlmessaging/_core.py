@@ -28,7 +28,7 @@ _DIRECTORY_CONNECTION_ID = 1
 _FIRST_CONNECTION_ID = _DIRECTORY_CONNECTION_ID + 1
 _MACHINE_HUB_ROUTER_ID = 0
 _MAX_IPC_LISTEN_ATTEMPTS = 1000
-_DEFAULT_HEARTBEAT_ENTRIES_TIMEOUT = 10_000
+_DEFAULT_HEARTBEAT_ENTRIES_INTERVAL = 10_000
 
 
 Monitor = collections.namedtuple('Monitor', ('type', 'args'))
@@ -136,6 +136,10 @@ class Connection:
                             if msg.isReply:
                                 handled = True
                                 break
+                        elif instruction == VLM.HANDLE_PING:
+                            if msg.subject == VLM.PING and not msg.isReply:
+                                await self.send(msg.reply(None))
+                                handled = True
                         elif instruction == VLM.HANDLE_DOES_NOT_UNDERSTAND:
                             if msg.subject == VLM.DOES_NOT_UNDERSTAND:
                                 handled = True
@@ -144,7 +148,7 @@ class Connection:
                                 await self.send(msg.reply(msg.subject, subject=VLM.DOES_NOT_UNDERSTAND))
                                 handled = True
                         else:
-                            raise SyntaxError(f'Unknown instruction "{msg.subject}".')
+                            raise SyntaxError(f'Unknown instruction "{instruction}".')
                     if not handled:
                         _PPMsg(f'UNHANDLED SUBJECT', msg)
             except ExitMessageHandler as ex:
@@ -261,7 +265,7 @@ class Router:
         self._canHostIpcHubDirectory = canHostIpcHubDirectory
         self._scheduledCallbacksByFnId = {}
 
-        self._directory = Directory(self)
+        self._directory = Directory(self, autoDrop=False)   # OPEN: False for dev so needs setting elsewhere
         if mode in (VLM.MACHINE_MODE, VLM.NETWORK_MODE):
             # create _sIpc socket
             self._sIpc = pynng.Pair1(polyamorous=True)
@@ -298,8 +302,9 @@ class Router:
         asyncio.create_task(self._processEventsUntilShutdown())
 
 
-    def scheduleCallback(self, fn, every=Missing):
+    def scheduleCallback(self, fn, every=Missing, after=Missing):
         # OPEN: move this to the routers main loop so can be cancelled cleanly on shutdown and make debugging easier
+        # OPEN: implement after
         fnId = id(fn)
         if fnId in self._scheduledCallbacksByFnId:
             raise ProgrammerError(f'Callback function {fn} is already scheduled.')
@@ -543,25 +548,24 @@ class Directory:
     __slots__ = (
         '_conn',
         '_entries',                 # [Entry]
-        '_removeIfNoPingReply',     # map of addr -> timestamp
-        '_heartbeatEntriesTimeout',
+        '_potentiallyStale',        # set() of addr we haven't heard from in a while
+        '_heartbeatEntriesInterval',
     )
 
-    def __init__(self, router, noDrop=False, heartbeatEntriesTimeout=Missing):
+    def __init__(self, router, autoDrop=True, heartbeatEntriesTimeout=Missing):
         if router._connectionById.get(_DIRECTORY_CONNECTION_ID, Missing) is not Missing:
             raise RuntimeError('A Directory already exists on this router')
         self._conn = router._newConnection(_DIRECTORY_CONNECTION_ID, self.msgArrived)
-        self._heartbeatEntriesTimeout = _DEFAULT_HEARTBEAT_ENTRIES_TIMEOUT if heartbeatEntriesTimeout is Missing else heartbeatEntriesTimeout
-        if not noDrop:
-            router.scheduleCallback(self._heartbeatEntries, every=self._heartbeatEntriesTimeout)
+        self._heartbeatEntriesInterval = _DEFAULT_HEARTBEAT_ENTRIES_INTERVAL if heartbeatEntriesTimeout is Missing else heartbeatEntriesTimeout
+        if autoDrop:
+            router.scheduleCallback(self._heartbeatEntries, every=self._heartbeatEntriesInterval)
         self._entries = []
-        self._removeIfNoPingReply = set()
+        self._potentiallyStale = set()
 
     async def msgArrived(self, msg):
-        # self._removeIfNoPingReply.discard(msg.fromAddr)
+        self._potentiallyStale.discard(msg.fromAddr)
 
         if msg.subject == VLM.REGISTER_ENTRY:
-            # OPEN: use this instead of a heartbeat
             addr, service, params, vnets, perms = msg.contents
             for a, s, p, _, _ in self._entries:
                 if a == addr and s == service and p == params:
@@ -586,16 +590,13 @@ class Directory:
             else:
                 await self._conn.send(msg.reply(self._entries))
 
-        elif msg.subject == VLM.PING:
-            if not msg.isReply: await self._conn.send(msg.reply(None))
-
         else:
-            await self._conn.send(msg.reply(msg.subject, subject=VLM.DOES_NOT_UNDERSTAND))
+            return [VLM.HANDLE_PING, VLM.HANDLE_DOES_NOT_UNDERSTAND]
 
     def _heartbeatEntries(self):
-        self._entries = [entry for entry in self._entries if entry.addr not in self._removeIfNoPingReply]
-        self._removeIfNoPingReply = set([entry.addr for entry in self._entries])
-        for addr in self._removeIfNoPingReply:
+        self._entries = [entry for entry in self._entries if entry.addr not in self._potentiallyStale]
+        self._potentiallyStale = set([entry.addr for entry in self._entries])
+        for addr in self._potentiallyStale:
             asyncio.create_task(self._conn.send(Msg(addr, VLM.PING, None)))
 
 

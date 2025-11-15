@@ -56,7 +56,7 @@ class GetCurrentAgent:
             self.delay = max(0, self.delay - 100)
             await self.conn.send( msg.reply(41) )
 
-        if msg.subject == self.KILL:
+        elif msg.subject == self.KILL:
             self.running = False
             await self.conn.send( msg.reply(None) )
             self.conn = None
@@ -64,11 +64,8 @@ class GetCurrentAgent:
         elif msg.subject == self.SHUTDOWN:
             await self.conn.shutdown()
 
-        elif msg.subject == VLM.PING:
-            if not msg.isReply: await self.conn.send(msg.reply(None))
-
         else:
-            return [VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
+            return [VLM.HANDLE_PING, VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
 
 
 @with_async_init
@@ -110,11 +107,8 @@ class AddOneToCurrentAgent:
         elif msg.subject == self.SHUTDOWN:
             await self.conn.shutdown()
 
-        elif msg.subject == VLM.PING:
-            if not msg.isReply: await self.conn.send(msg.reply(None))
-
         else:
-            return [VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
+            return [VLM.HANDLE_PING, VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
 
 
 
