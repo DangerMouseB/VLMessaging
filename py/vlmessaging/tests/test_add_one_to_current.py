@@ -7,6 +7,14 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
+# detailed test that creates two agents - GetCurrentAgent and AddOneToCurrentAgent and a driver script and uses them
+# to test various configurations including:
+# - single process, one router, one thread / eventloop
+# - single process, three ipc routers, one thread / event loop
+# - single process, three tcp routers, one thread / event loop
+# - three processes, each with one ipc router / thread / event loop
+
+
 # Python imports
 import asyncio, multiprocessing, os, inspect, itertools
 
@@ -14,8 +22,8 @@ import asyncio, multiprocessing, os, inspect, itertools
 from coppertop.utils import Missing
 
 # local imports
-from vlmessaging import Msg, Router, Entry, Directory, VLM
-from vlmessaging.utils import with_async_init
+from vlmessaging import Msg, Router, Entry, VLM, ExitMessageHandler
+from vlmessaging.utils import with_async_init, Timer, until
 from vlmessaging._utils import _findSingleEntryAddrOfTypeOrExit
 from vlmessaging._core import _PPMsg
 
@@ -23,16 +31,16 @@ from vlmessaging._core import _PPMsg
 @with_async_init
 class GetCurrentAgent:
 
-    __slots__ = ('conn', 'wait', 'running')
+    __slots__ = ('conn', 'delay', 'running')
 
     ENTRY_TYPE = 'GetCurrentAgent'
     GET_CURRENT = 'GET_CURRENT'
     KILL = 'KILL'
     SHUTDOWN = 'SHUTDOWN'
 
-    async def __init__(self, router, wait):
+    async def __init__(self, router, delay):
         self.conn = router.newConnection(self.msgArrived)
-        self.wait = wait
+        self.delay = delay
         entryAdded = False
         self.running = True
         while not entryAdded:
@@ -44,8 +52,8 @@ class GetCurrentAgent:
         if not self.running: return
 
         if msg.subject == self.GET_CURRENT:
-            await asyncio.sleep(self.wait / 1000)
-            self.wait = max(0, self.wait - 100)
+            await asyncio.sleep(self.delay / 1000)
+            self.delay = max(0, self.delay - 100)
             await self.conn.send( msg.reply(41) )
 
         if msg.subject == self.KILL:
@@ -55,6 +63,9 @@ class GetCurrentAgent:
 
         elif msg.subject == self.SHUTDOWN:
             await self.conn.shutdown()
+
+        elif msg.subject == VLM.PING:
+            if not msg.isReply: await self.conn.send(msg.reply(None))
 
         else:
             return [VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
@@ -99,6 +110,9 @@ class AddOneToCurrentAgent:
         elif msg.subject == self.SHUTDOWN:
             await self.conn.shutdown()
 
+        elif msg.subject == VLM.PING:
+            if not msg.isReply: await self.conn.send(msg.reply(None))
+
         else:
             return [VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_DOES_NOT_UNDERSTAND]
 
@@ -109,8 +123,16 @@ async def _test_add_one_to_current(router):
 
     # check that AddOneToCurrentAgent can find GetCurrentAgent and get a reply eventually
     addOneAgentAddr = Missing
-    while not addOneAgentAddr:
-        addOneAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, AddOneToCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
+    # OPEN: we need to start heartbeat loops of directories so hub and non-hub directories can sync
+    t = Timer(5000)
+    while not addOneAgentAddr and not t:
+        try:
+            addOneAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, AddOneToCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
+        except ExitMessageHandler:
+            pass
+        await asyncio.sleep(0.5)
+    if addOneAgentAddr is Missing:
+        raise RuntimeError(f'Could not find an {AddOneToCurrentAgent.ENTRY_TYPE} entry')
     msg = Msg(addOneAgentAddr, AddOneToCurrentAgent.ADD_ONE_TO_CURRENT, None)
     res = await conn.send(msg, 5000)
     _PPMsg(f'Got', f'{res.subject} = {res.contents}')
@@ -159,14 +181,14 @@ async def _startRouterWithAgents(routerKwargs, seqOfFnAndArgs):
         if inspect.iscoroutine(agent):
             agent = await agent
         agents.append(agent)
-    # await router.shutdown()
-    await router.hasShutdown()
+    return router
 
 
 def _startAgents(outBox, routerKwargs, seqOfFnAndArgs):
     async def _():
         try:
-            await _startRouterWithAgents(routerKwargs, seqOfFnAndArgs)
+            router = await _startRouterWithAgents(routerKwargs, seqOfFnAndArgs)
+            await until(router.hasShutdown)
             outBox.put((os.getpid(), True))
         except AssertionError as e:
             outBox.put((os.getpid(), False))
@@ -174,14 +196,29 @@ def _startAgents(outBox, routerKwargs, seqOfFnAndArgs):
     asyncio.run(_())
 
 
-def start_services():
-    asyncio.run(_startRouterWithAgents(
-        dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=True),
-        [
-            (AddOneToCurrentAgent, ()),
-            (GetCurrentAgent, (500,)),
-        ]
-    ))
+def _start_services_3_routers_1_loop():
+    async def _():
+        router1 = await _startRouterWithAgents(
+            dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=True),
+            [
+                (AddOneToCurrentAgent, ()),
+            ]
+        )
+        router2 = await _startRouterWithAgents(
+            dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=True),
+            [
+                (GetCurrentAgent, (500,)),
+            ]
+        )
+        router3 = await _startRouterWithAgents(
+            dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=False),
+            [
+                (_test_add_one_to_current, ()),
+            ]
+        )
+        await until(router1.hasShutdown and router2.hasShutdown and router3.hasShutdown, timeout=10000)
+    asyncio.run(_())
+
 
 def test_add_one_to_current_1_process():
     outBox = multiprocessing.Queue()
@@ -252,7 +289,7 @@ class CountFailures(object):
 if __name__ == "__main__":
     failures = itertools.count()
     with CountFailures(failures): test_add_one_to_current_1_process()
-    # start_services()
+    # _start_services_3_routers_1_loop()
     # with CountFailures(failures): test_add_one_to_current_3_processes()
     print()
     print('failed' if failures.__reduce__()[1][0] else 'passed')

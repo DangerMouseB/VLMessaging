@@ -7,6 +7,8 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
+# adaptation of pynng Pair1 polyamorous socket example converted to run with asyncio as a single test
+
 # Python imports
 import pynng, asyncio
 

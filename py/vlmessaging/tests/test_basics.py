@@ -11,7 +11,7 @@
 import asyncio
 
 # local imports
-from vlmessaging import Msg, Addr, Router, VLM
+from vlmessaging import Msg, Addr, Router
 from vlmessaging._core import _msgFromBytes, _msgAsBytes
 
 

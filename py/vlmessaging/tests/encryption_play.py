@@ -1,10 +1,21 @@
+# **********************************************************************************************************************
+# Copyright 2025 David Briant, https://github.com/coppertop-bones. Licensed under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance with the License. You may obtain a copy of the  License at
+# http://www.apache.org/licenses/LICENSE-2.0. Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY  KIND,
+# either express or implied. See the License for the specific language governing permissions and limitations under the
+# License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
+# **********************************************************************************************************************
+
+# demo of end-to-end encryption with RSA and AES-256
+
+# 3rd party imports
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
-
 
 # https://leducphong.medium.com/best-crypto-libraries-for-python-developers-43cd3d93d49c
 
@@ -31,6 +42,7 @@ from cryptography.hazmat.primitives import hashes
 
 # https://blog.cryptographyengineering.com/useful-cryptography-resources/
 # https://leducphong.medium.com/zero-knowledge-proof-learning-resources-a-learning-path-5f7a1e4a90aa
+
 
 def genKeys():
     auth_agent_pvt = rsa.generate_private_key(

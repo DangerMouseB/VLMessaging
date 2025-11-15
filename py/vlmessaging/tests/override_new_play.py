@@ -7,6 +7,9 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
+# playing with overriding __new__ with a decorator so can make __init__ async
+
+# Python imports
 import inspect
 
 

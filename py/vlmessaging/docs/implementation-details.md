@@ -16,7 +16,6 @@ Summary:
 - trio and curio require the main thread.
 
 
-
 ## uvloop vs asyncio ##
 
 uvloop is a drop-in replacement for the default asyncio event loop, but it is implemented in Cython and uses libuv
@@ -33,11 +32,35 @@ In summary: uvloop is a high-performance, drop-in replacement for the default as
 but faster and implemented in Cython using libuv.
 
 
-
 ## LEARNING ##
 - in asyncio a "task" is a stack, a "future" is an object that is awaiting a reply
 - asyncio.create_task(...) schedules a coroutine to run in the background and returns a Task object.
 - A Task is defined by the asyncio library in Python, not by the Python language itself. It is an object that wraps
   and manages the execution of a coroutine within an event loop. Other async libraries (like Trio) have their own
   task concepts, but Task as a class is from asyncio.
+
+
+## IMPLEMENTATION ##
+
+Only directories are aware of hub directories and may message them as hubs - this allows use to have special 
+connections to hubs and removes the burden of other agents needing  to have to logic to select between connection to 
+hub and non-hub directories. So a message can be sent to a hub on the special pipe but be returned on the regular pipe.
+
+
+## INTER-MACHINE CONNECTIONS ##
+
+We wish to restrict the number of ports in use. We allow multi-hop routing between routers via a hub router.
+
+```
+A          B
+B:1*  ---  1* on port 30005
+B:2   ---  2  on port 30006
+B:3*  ---  3* on port 30007
+```
+
+A message sent to B:2 can be sent directly to B:2 (which is one hop quicker) or via B:1* or B:3* (which allows a port 
+to be shared). 
+
+To use the nng pub-sub at the IP level each publishers needs a port or we need to encode the from address into the 
+broadcast message so the subscriber can forward the msg to just the interested recipients.
 

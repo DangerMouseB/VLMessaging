@@ -7,7 +7,7 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
-
+import asyncio, time
 
 def with_async_init(cls):
     # baseed on https://gist.github.com/AnoRebel/433110fcf589dba6f26ea6cf8c3320a4 - AnoRebel/asyncinit.py
@@ -33,3 +33,41 @@ def with_async_init(cls):
 
     cls.__new__ = replacement_new
     return cls
+
+
+async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
+    """Wraps any Event in awaitables in a Task then returns await asyncio.wait(...)."""
+    if len(awaitables) == 1 and isinstance(awaitables[0], (list, tuple, set)):
+        things = awaitables[0]
+    else:
+        things = awaitables
+    things = [eventWaitingTask(thing) if isinstance(thing, asyncio.Event) else thing for thing in things]
+    return await asyncio.wait(things, timeout=timeout, return_when=return_when)
+
+
+def eventWaitingTask(ev):
+    async def _(ev):
+        return await ev.wait()
+    return asyncio.create_task(_(ev))
+
+
+class Timer:
+    """Monotonic timer in milliseconds.
+
+    Usage:
+        t = timer(10000)
+        while not t:
+            ...
+    """
+
+    __slots__ = ('_deadline')
+
+    def __init__(self, timeoutInMilliseconds:float):
+        self._deadline = time.monotonic() + timeoutInMilliseconds / 1000.0
+
+    def __bool__(self):
+        # returns True if timer has expired
+        return time.monotonic() >= self._deadline
+
+    def __repr__(self) -> str:
+        return f"<timer expired={not not self}>"
