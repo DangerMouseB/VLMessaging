@@ -211,19 +211,19 @@ def _startAgents(outBox, routerKwargs, seqOfFnAndArgs):
 def _start_services_3_routers_1_loop():
     async def _():
         router1 = await _startRouterWithAgents(
-            dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=True),
+            dict(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=True),
             [
                 (AddOneToCurrentAgent, ()),
             ]
         )
         router2 = await _startRouterWithAgents(
-            dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=True),
+            dict(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=True),
             [
                 (GetCurrentAgent, (500,)),
             ]
         )
         router3 = await _startRouterWithAgents(
-            dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=False),
+            dict(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False),
             [
                 (_test_add_one_to_current, ()),
             ]
@@ -258,7 +258,7 @@ def test_add_one_to_current_3_processes():
     outBox = multiprocessing.Queue()
     p1 = multiprocessing.Process(target=_startAgents, args=(
         outBox,
-        dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=True),
+        dict(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=True),
         # {'listen': 'localhost:30000', 'connect': [VLM.MACHINE_WIDE]},
         [
             (AddOneToCurrentAgent, ()),
@@ -266,14 +266,14 @@ def test_add_one_to_current_3_processes():
     ))
     p2 = multiprocessing.Process(target=_startAgents, args=(
         outBox,
-        dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=True),
+        dict(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=True),
         [
             (GetCurrentAgent, (500,)),
         ]
     ))
     p3 = multiprocessing.Process(target=_startAgents, args=(
         outBox,
-        dict(mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=False),
+        dict(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False),
         [
             (_test_add_one_to_current, ()),
         ]

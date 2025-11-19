@@ -11,7 +11,7 @@
 import asyncio
 
 # local imports
-from vlmessaging import Msg, Addr, Router
+from vlmessaging import Msg, Addr, Router, VLM
 from vlmessaging._core import _msgFromBytes, _msgAsBytes
 
 
@@ -30,6 +30,7 @@ def test_serialise():
     assert msg._replyId == msg2._replyId
 
 
+
 def test_messaging():
 
     # test that sending to a non-existent connection returns MSG_NOT_DELIVERED
@@ -43,7 +44,8 @@ def test_messaging():
     # res = await conn.send(msg, 5000)
 
     async def run_add_one_test():
-        router = Router()
+        router = Router(False)
+        router2 = Router(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False)
         x1 = router.newConnection()
         x2 = router.newConnection(lambda m: None)
 
@@ -70,7 +72,37 @@ def test_messaging():
     assert result2 == 42
 
 
+def test_ipc():
+
+    class Fred:
+        def __init__(self, router):
+            self.conn = router.newConnection(self.msgArrived)
+
+        async def msgArrived(self, msg):
+            if msg.subject == 'ADD_ONE':
+                self.conn.send(msg.reply(msg.contents + 1))
+            else:
+                raise NotImplementedError()
+
+    async def run_add_one_test():
+        router1 = Router(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False, name='fred')
+        router2 = Router(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False, name='joe')
+        fred = Fred(router1)
+
+        conn2 = router2.newConnection()
+
+        result1 = await conn2.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)
+        result2 = await conn2.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)
+        assert result2.contents == 42
+
+        await router1.shutdown()
+        await router2.shutdown()
+
+    asyncio.run(run_add_one_test())
+
+
 def main():
+    test_ipc()
     test_serialise()
     # test_messaging() - wip
     print('passed')

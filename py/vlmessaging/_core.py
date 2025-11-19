@@ -37,6 +37,7 @@ _IPC_EVENT = 2
 _TCP_EVENT = 3
 _TIMER_EVENT = 4
 _SHUTDOWN_EVENT = 5
+_AWAITING_CONNECTION_TIMER_EVENT = 6
 
 class ExitMessageHandler(Exception): pass
 
@@ -229,64 +230,63 @@ class Connection:
 class Router:
 
     __slots__ = (
-        '_sIpc',                    # socket for connections with other routers on this machine
-        '_ipcPipeByRouterId',
-        '_sIpcHub',                 # socket for finding the router that has the machine level hub directory
-        '_searchForIpcHub',
-        '_sRemotePeerListener',     # remote peer connections
-        '_remotePipeByAddr',
-        '_sRemoteByAddr',
         '_routerId',
+        '_name',
         '_connectionIdSeed',
-        '_connectionById',
         '_inboxById',
+        '_connectionById',
         '_refreshTasksToMonitor',
         '_isShuttingDown',          # an Event signalling that the router is shutting down
-        '_hasShutdown',             # an Event signalling that the router has shutdown
         '_isShuttingDownTask',      # a task that waits for the isShuttingDown event that connections can use to timeout
-        '_directory',
-        '_canHostIpcHubDirectory',
-        '_scheduledCallbacksByFnId',
+        '_hasShutdown',             # an Event signalling that the router has shutdown
+        '_sLocal',                  # socket for connections with other routers on this machine
+        '_sHub',                    # socket for establishing the hub directory (either this or another router)
         '_pipeByPipeId',            # when we get a new pipe we store it here
-        '_pipeIdByRouterId',
-        '_routerIdByPipeId'
+        '_pipeByRouterId',          # so we know which pipe to send a msg down
+        '_routerIdByPipeId',        # so we know which router a msg has come from - not strictly required except for validating a from address?
+        '_directory',
+        '_canRunLocalHubDirectory',
+        '_scheduledCallbacksByFnId',
+        '_msgsAwaitingConnection',  # to be checked periodically for connection, reply with unroutable on time out
+        # _pipeByMachineAndRouterIds    # for a single hop - if not here then use the following
+        # _pipeByMachineId              # for a two hop - machine id doesn't need to be a machine id could just be an IP
+
     )
 
 
-    def __init__(self, mode=VLM.MACHINE_MODE, canHostIpcHubDirectory=True):
+    def __init__(self, mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=True, name=Missing):
         if mode not in (VLM.LOCAL_MODE, VLM.MACHINE_MODE, VLM.NETWORK_MODE):
             raise ValueError(f'Unknown router mode "{mode}".')
 
-        self._sIpc, self._ipcPipeByRouterId, self._sIpcHub = Missing, {}, Missing
-        self._searchForIpcHub = False
-        self._sRemotePeerListener, self._remotePipeByAddr, self._sRemoteByAddr = Missing, {}, Missing
-        self._connectionById , self._inboxById = weakref.WeakValueDictionary(), {}
-        self._connectionIdSeed, self._refreshTasksToMonitor = itertools.count(_FIRST_CONNECTION_ID), False
+        self._connectionById, self._inboxById, self._connectionIdSeed = weakref.WeakValueDictionary(), {}, itertools.count(_FIRST_CONNECTION_ID)
+        self._refreshTasksToMonitor = False
         self._isShuttingDown = asyncio.Event()
         self._hasShutdown = asyncio.Event()
         self._isShuttingDownTask = asyncio.create_task(self._isShuttingDown.wait())
-        self._routerId = os.getpid()
-        self._canHostIpcHubDirectory = canHostIpcHubDirectory
-        self._scheduledCallbacksByFnId = {}
 
-        self._directory = Directory(self, autoDrop=False)   # OPEN: False for dev so needs setting elsewhere
+        self._sLocal, self._sHub = Missing, Missing
+        self._pipeByPipeId, self._pipeByRouterId, self._routerIdByPipeId = {}, {}, {}
+        self._canRunLocalHubDirectory = canRunLocalHubDirectory
+        self._scheduledCallbacksByFnId = {}
+        self._msgsAwaitingConnection = []
+
+        # figure the routerId and listen on a (local) socket
+        self._routerId = os.getpid()    # OPEN: random number instead? any advantage or security concern about using pid?
         if mode in (VLM.MACHINE_MODE, VLM.NETWORK_MODE):
-            # create _sIpc socket
-            self._sIpc = pynng.Pair1(polyamorous=True)
-            self._sIpc.add_pre_pipe_connect_cb(self._sIpcPreConnectCb)
-            self._sIpc.add_post_pipe_connect_cb(self._sIpcPostConnectCb)
-            self._sIpc.add_post_pipe_remove_cb(self._sIpcPostRemoveCb)
+            # create and setup _sLocal socket
+            self._sLocal = pynng.Pair1(polyamorous=True)
+            self._sLocal.add_post_pipe_connect_cb(self._sLocalPostConnectCb)
+            self._sLocal.add_post_pipe_remove_cb(self._sLocalPostRemoveCb)
             i = 0
             while i < _MAX_IPC_LISTEN_ATTEMPTS:
                 try:
-                    self._sIpc.listen(_ipcAddr(self._routerId + i))
+                    self._sLocal.listen(_ipcAddr(self._routerId))
                     break
                 except pynng.exceptions.AddressInUse as ex:
+                    self._routerId += 1
                     i += 1
             if i >= _MAX_IPC_LISTEN_ATTEMPTS:
-                raise RuntimeError(f'Unable to find a free Ipc address from {self._routerId} to {self._routerId+_MAX_IPC_LISTEN_ATTEMPTS} on this machine.')
-            else:
-                self._routerId += i
+                raise RuntimeError(f'Unable to find a free Ipc address.')
 
             # initial attempt to connect to machine hub directory
             self._checkMachineHubConnection()
@@ -302,6 +302,9 @@ class Router:
             #     to the network hub directory
             # isIntraMachineRouter - allows forwarding of messages between other machine routers and network routers
             raise NotYetImplemented('NETWORK_MODE')
+
+        self._name = str(self._routerId) if name is Missing else name
+        self._directory = Directory(self, autoDrop=False)   # OPEN: False for dev so needs setting elsewhere
 
         asyncio.create_task(self._processEventsUntilShutdown())
 
@@ -327,61 +330,62 @@ class Router:
             self._scheduledCallbacksByFnId.pop(fnId).cancel()
 
     def _checkMachineHubConnection(self):
-        if not (hubPipe := self._ipcPipeByRouterId.get(_MACHINE_HUB_ROUTER_ID, Missing)):
-            if not self._sIpcHub and self._canHostIpcHubDirectory:
+        if not (hubPipe := self._pipeByRouterId.get(_MACHINE_HUB_ROUTER_ID, Missing)):
+            if not self._sHub and self._canRunLocalHubDirectory:
                 # try to become the machine hub directory
                 try:
                     s = pynng.Pair1(polyamorous=True)
                     s.listen(_ipcAddr(_MACHINE_HUB_ROUTER_ID))
-                    s.add_pre_pipe_connect_cb(self._sIpcHubPreConnectCb)
-                    s.add_post_pipe_remove_cb(self._sIpcHubPostRemoveCb)
-                    self._sIpcHub = s
+                    s.add_post_pipe_remove_cb(self.sLocalHubPostConnectCb)
+                    s.add_post_pipe_remove_cb(self._sLocalHubPostRemoveCb)
+                    self._sHub = s
                 except pynng.exceptions.AddressInUse as ex:
                     pass
-            if not self._sIpcHub:
+            if not self._sHub:
                 # we do not host the machine hub directory try to connect to it
                 try:
-                    self._ipcPipeByRouterId[_MACHINE_HUB_ROUTER_ID] = self._sIpc.dial(_ipcAddr(_MACHINE_HUB_ROUTER_ID))
+                    self._pipeByRouterId[_MACHINE_HUB_ROUTER_ID] = self._sLocal.dial(_ipcAddr(_MACHINE_HUB_ROUTER_ID))
                     self._refreshTasksToMonitor = True
                 except pynng.exceptions.ConnectionRefused as ex:
                     pass
 
-    def _sIpcPreConnectCb(self, pipe):
-        addr = str(pipe.remote_address)
-        if addr:
-            print(f'addr: {addr} connecting to {self._routerId}')
-            routerId = int(addr.split('_')[-1])
-            self._ipcPipeByRouterId[routerId] = pipe
-            self._refreshTasksToMonitor = True
-
-    def _sIpcPostConnectCb(self, pipe):
+    def _sLocalPostConnectCb(self, pipe):
+        try:
+            # send my router id to the remote peer as the first message on this pipe
+            msg = pynng.Message(str(self._routerId).encode(), pipe)
+            pipe.socket.send_msg(msg, block=False)
+        except Exception as ex:
+            _PPMsg('PostConnectCb', f'{self._name} exception - repr(ex)')
         self._pipeByPipeId[pipe.id] = pipe
-        addr = str(pipe.remote_address)
-        if addr:
-            print(f'addr: {addr} connected to {self._routerId}')
+        _PPMsg('PostConnectCb', f'{self._name} - {_localPipeAddr(pipe)}')
+        self._refreshTasksToMonitor = True
 
-    def _sIpcPostRemoveCb(self, pipe):
-        addr = str(pipe.remote_address)
-        if addr:
-            print(f'addr: {addr} disconnected from {self._routerId}')
-            routerId = int(addr.split('_')[-1])
-            self._ipcPipeByRouterId.pop(routerId, None)
-            self._refreshTasksToMonitor = True
+    def _sLocalPostRemoveCb(self, pipe):
+        routerId = self._routerIdByPipeId.pop(pipe.id, None)
+        if routerId:
+            self._pipeByRouterId.pop(routerId, None)
+            _PPMsg('PostRemoveCb', f'{self._name} - <{routerId}> aka <{_localPipeAddr(pipe)}>')
+        else:
+            _PPMsg('PostRemoveCb', f'{self._name} - {_localPipeAddr(pipe)}')
+        self._pipeByPipeId.pop(pipe.id, None)
+        self._refreshTasksToMonitor = True
 
-    def _sIpcHubPreConnectCb(self, pipe):
+    # ugh headache
+    #         self._pipeByPipeId, self._pipeByRouterId, self._routerIdByPipeId
+    def sLocalHubPostConnectCb(self, pipe):
         addr = str(pipe.remote_address)
         if addr:
             routerId = int(addr.split('_')[-1])
-            if routerId in self._ipcPipeByRouterId:
+            if routerId in self._pipeByRouterId:
                 raise ProgrammerError(f'Router ID {routerId} already connected to IPC hub.')
-            self._ipcPipeByRouterId[routerId] = pipe
+            self._pipeByRouterId[routerId] = pipe
             self._refreshTasksToMonitor = True
 
-    def _sIpcHubPostRemoveCb(self, pipe):
+    def _sLocalHubPostRemoveCb(self, pipe):
         addr = str(pipe.remote_address)
         if addr:
             routerId = int(addr.split('_')[-1])
-            self._ipcPipeByRouterId.pop(routerId, None)
+            self._pipeByRouterId.pop(routerId, None)
             self._refreshTasksToMonitor = True
 
     def newConnection(self, fn=Missing):
@@ -432,18 +436,13 @@ class Router:
                             _PPMsg(f'unroutable', msg._msgId)
                             inbox.put_nowait(reply)
             else:
-                # OPEN: handle PUB?
-                ipcRouterPipe = self._ipcPipeByRouterId.get(routerId, Missing)
+                ipcRouterPipe = self._pipeByRouterId.get(routerId, Missing)
                 if ipcRouterPipe is Missing:
-                    # incoming connections are on the pipe of the sIpcRouterListener
-                    # outgoing connections have 1 pipe per socket
-
-                    # I believe we can use the listening socket to dial out to other sockets
-                    addr = _ipcAddr(routerId)
+                    # create an outgoing connection to the other router
                     try:
-                        # create an outgoing connection to the other router
-                        ipcRouterPipe = self._ipcPipeByRouterId[routerId] = self._sIpc.dial(_ipcAddr(routerId))
+                        self._sLocal.dial(_ipcAddr(routerId))
                         self._refreshTasksToMonitor = True
+                        self._msgsAwaitingConnection.append(msg)
                     except pynng.exceptions.ConnectionRefused as ex:
                         if msg.subject == VLM.MSG_NOT_DELIVERED:
                             # don't get into a loop of undeliverable messages
@@ -456,16 +455,22 @@ class Router:
                                 _PPMsg(f'unroutable', msg._msgId)
                                 inbox.put_nowait(reply)
                         return
-                ipcRouterPipe.asend(stuff.encode())
+                else:
+                    ipcRouterPipe.asend(_msgAsBytes(msg))
         else:
             # OPEN: handle inter-machine routing
             raise NotYetImplemented('inter-machine routing')
 
     async def _processEventsUntilShutdown(self):
-        # We keep a list of tasks waiting for events (e.g. messages to arrive in each connection's inbox.) To prevent
-        # starvation we schedule them fairly by moving a task that has just been processed to the end of the list thus
-        # silent tasks bubble to the front. This is mildly wasteful since silent tasks need to be checked each
-        # loop but does ensure that busy tasks don't dominate things.
+        # We keep a list of tasks waiting for events, i.e.:
+        #   - message arriving in each connection's inbox
+        #   - message arriving in each socket (local and remote)
+        #   - shutdown event
+        #   - timer events for scheduled callbacks
+        #
+        # To prevent starvation we schedule them fairly by moving a task that has just been processed to the end of the
+        # list thus silent tasks bubble to the front. This is mildly wasteful since silent tasks need to be checked
+        # each loop, but it does ensure that busy tasks don't dominate things.
         taskToMonitorMap = {self._isShuttingDownTask: Monitor(_SHUTDOWN_EVENT, None)}
         running = True
         pending = []
@@ -475,7 +480,6 @@ class Router:
                 tasksToRemove = []
                 for t, m in taskToMonitorMap.items():
                     if m.type == _INBOX_EVENT and m.args not in self._connectionById: tasksToRemove.append(t)   # drop closed connections
-                    if m.type == _IPC_EVENT and m.args not in self._ipcPipeByRouterId: tasksToRemove.append(t)  # drop closed Ipc pipes
                 for t in tasksToRemove:
                     # _PPMsg(f'dropping', f'{tasksToRemove[t]}')
                     t.cancel('no longer needed')
@@ -483,22 +487,27 @@ class Router:
                     # t.uncancel()    # "in cases when suppressing asyncio.CancelledError is truly desired, it is necessary to also call uncancel()"
                     taskToMonitorMap.pop(t)
                 await asyncio.gather(*tasksToRemove, return_exceptions=True)
+
                 # add new tasks that are needed
+                # inboxes
                 for cId, conn in self._connectionById.items():
-                    if (_INBOX_EVENT, cId) not in taskToMonitorMap.values():
-                        taskToMonitorMap[asyncio.create_task(self._inboxById[cId].get())] = Monitor(_INBOX_EVENT, cId)                  # add any new connections
-                for routerId, pipe in self._ipcPipeByRouterId.items():
-                    if (_IPC_EVENT, routerId) not in taskToMonitorMap.values():
-                        taskToMonitorMap[asyncio.create_task(self._ipcPipeByRouterId[routerId].get())] = Monitor(_IPC_EVENT, routerId)  # add any new pic pipes
+                    if Monitor(_INBOX_EVENT, cId) not in taskToMonitorMap.values():
+                        taskToMonitorMap[asyncio.create_task(self._inboxById[cId].get())] = Monitor(_INBOX_EVENT, cId)
+
+                # ipc sockets
+                if self._sLocal and Monitor(_IPC_EVENT, 0) not in taskToMonitorMap.values():
+                    taskToMonitorMap[asyncio.create_task(self._sLocal.arecv_msg())] = Monitor(_IPC_EVENT, 0)
+
+                # scheduled callbacks
                 # for fnId, cb in self._scheduledCallbacksByFnId.items():
                 #     if (_TIMER_EVENT, fnId) not in taskToMonitorMap.values():
-                #         taskToMonitorMap[asyncio.create_task(self._ipcPipeByRouterId[routerId].get())] = Monitor(_TIMER_EVENT, fnId)  # add any new pic pipes
+                #         taskToMonitorMap[asyncio.create_task(self._pipeByRouterId[routerId].get())] = Monitor(_TIMER_EVENT, fnId)  # add any new pic pipes
                 self._refreshTasksToMonitor = False
 
             # wait for a task to complete
             done, pending = await asyncio.wait(taskToMonitorMap.keys(), return_when=asyncio.FIRST_COMPLETED)
 
-            # process it
+            # process done tasks (always just one?)
             for task in done:
                 # pull the done task from the queue
                 m = taskToMonitorMap.pop(task)
@@ -510,18 +519,26 @@ class Router:
                     msg = task.result()
                     if (conn := self._connectionById.get(cId, Missing)) is not Missing:
                         inbox = self._inboxById[cId]
+                        # we need to schedule a new task here rather than await otherwise we block processing other events
                         asyncio.create_task(conn._deliver(msg))
-                        # add a new task for this connection to the end of the queue
-                        taskToMonitorMap[asyncio.create_task(inbox.get())] = m
+                        taskToMonitorMap[asyncio.create_task(inbox.get())] = m              # add new task to end of queue
                 elif m.type == _IPC_EVENT:
-                    routerId = m.args
-                    raw = task.result()
-                    msg = _msgFromBytes(raw)
-                    # route the message
-                    self._route(msg)
-                    # add a new task for this pipe to the end of the queue
-                    pipe = self._ipcPipeByRouterId[routerId]
-                    taskToMonitorMap[asyncio.create_task(pipe.get())] = m
+                    msg = task.result()
+                    pipeId = msg.pipe.id
+                    routerId = self._routerIdByPipeId.get(pipeId, None)
+                    if routerId is None:
+                        # first message from the remote peer on this pipe is its routerId
+                        content = msg.bytes.decode()
+                        routerId = int(content)
+                        self._routerIdByPipeId[pipeId] = routerId
+                        _PPMsg('resolved', f'<{_localPipeAddr(msg.pipe)}> to <{routerId}>')
+                    else:
+                        msg = _msgFromBytes(msg.bytes)
+                        self._route(msg)
+                    taskToMonitorMap[asyncio.create_task(self._sLocal.arecv_msg())] = m     # add new task to end of queue
+                elif m.type == _AWAITING_CONNECTION_TIMER_EVENT:
+                    raise NotYetImplemented('_AWAITING_CONNECTION_TIMER_EVENT')
+                    # _msgsAwaitingConnection
                 elif m.type == _TCP_EVENT:
                     raise NotYetImplemented('_TCP_EVENT')
                 elif m.type == _TIMER_EVENT:
@@ -531,7 +548,6 @@ class Router:
                 else:
                     raise ProgrammerError(f'Unknown monitor type "{m.type}".')
 
-
         for t in pending:
             t.cancel()
             await asyncio.sleep(0)
@@ -539,6 +555,9 @@ class Router:
             t.cancel()
             await asyncio.sleep(0)
         _PPMsg('shutdown', '')
+
+    def __str__(self):
+        return f'Router<{self._name}::{self._routerId}>'
 
 
 
@@ -673,3 +692,7 @@ def _tcpAddr(ip, port):
         return f'tcp://127.0.0.1:{port}'
     else:
         return f'tcp://{ip}:{port}'
+
+def _localPipeAddr(pipe):
+    # in ipc local_address and remote_address are the same string - so display pipe id to distinguish remote peers
+    return f'<{pipe.remote_address}::{pipe.id}>'

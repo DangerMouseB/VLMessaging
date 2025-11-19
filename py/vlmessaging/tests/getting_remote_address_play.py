@@ -32,7 +32,6 @@ class Router:
         self._routerIdByPipeId = {}
 
         self._sock = pynng.Pair1(polyamorous=True)
-        self._sock.add_pre_pipe_connect_cb(self.pre_connect_cb)
         self._sock.add_post_pipe_connect_cb(self.post_connect_cb)
         self._sock.add_post_pipe_remove_cb(self.post_remove_cb)
         listener = self._sock.listen(listen_addr)
@@ -44,15 +43,11 @@ class Router:
         n.start_soon(self.recv_eternally, self._sock)
         n.start_soon(self.send_eternally, self._sock)
 
-    def pre_connect_cb(self, pipe):
-        # in ipc local_address and remote_address are the same string - so display pipe id to distinguish remote peers
-        print(f'pre_connect_cb: <{pipe.remote_address}::{pipe.id}>')
-
     def post_connect_cb(self, pipe):
         try:
             # send my router id to the remote peer as the first message on this pipe
             msg = pynng.Message(str(self.routerId).encode(), pipe)
-            self._sock.send_msg(msg, block=False)
+            pipe.socket.send_msg(msg, block=False)
         except Exception as ex:
             print(repr(ex))
         self._pipeByPipeId[pipe.id] = pipe
