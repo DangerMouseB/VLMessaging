@@ -8,6 +8,9 @@
 # **********************************************************************************************************************
 
 import asyncio, time
+from pynng import Message
+
+Void = None
 
 def with_async_init(cls):
     # baseed on https://gist.github.com/AnoRebel/433110fcf589dba6f26ea6cf8c3320a4 - AnoRebel/asyncinit.py
@@ -42,7 +45,14 @@ async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
     else:
         things = awaitables
     things = [eventWaitingTask(thing) if isinstance(thing, asyncio.Event) else thing for thing in things]
-    return await asyncio.wait(things, timeout=timeout, return_when=return_when)
+    secs = timeout / 1000.0 if timeout else None
+    if awaitables:
+        return await asyncio.wait(things, timeout=secs, return_when=return_when)
+    elif timeout is not None:
+        await asyncio.sleep(timeout / 1000.0)     # even if timeout == 0 yield at least once
+        return [], []
+    else:
+        return [], []
 
 
 def eventWaitingTask(ev):
@@ -50,6 +60,36 @@ def eventWaitingTask(ev):
         return await ev.wait()
     return asyncio.create_task(_(ev))
 
+
+def Queue():
+    return asyncio.Queue()
+
+def queue(q, x) -> Void:
+    q.put_nowait(x)
+
+def adequeue(q):
+    return asyncio.create_task(q.get())
+
+def arecv(s):
+    return asyncio.create_task(s.arecv_msg())
+
+def asend(p, bytes):
+    return asyncio.create_task(p.asend(bytes))
+
+def dial(s, addr, *, block):
+    return s.dial(addr, block=block)
+
+def send(p, bytes, *, block) -> Void:
+    assert not isinstance(bytes, str)
+    p.socket.send_msg(Message(bytes, p), block)
+
+def pipeConnectionType(pipe):
+    try:
+        pipe.listener
+        return 'incoming'
+    except TypeError:
+        pipe.dialer
+        return 'outgoing'
 
 class Timer:
     """Monotonic timer in milliseconds.
@@ -81,4 +121,13 @@ class CountFailures(object):
     def __exit__(self, type, value, traceback):
         if value is not None: next(self.counter)
         return True
+
+
+def monotonicTimeMs():
+    # we can be in control of time for testing etc
+    try:
+        return asyncio.get_running_loop().time() * 1000
+    except RuntimeError:
+        return time.monotonic() * 1000
+
 

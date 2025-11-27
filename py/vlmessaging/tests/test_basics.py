@@ -90,15 +90,30 @@ def test_ipc():
         fred = Fred(router1)
 
         conn2 = router2.newConnection()
+        await asyncio.sleep(1)
 
-        result1 = await conn2.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)
+
+        print(1)
+        result1 = await conn2.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 5_000)   # give time for routers to connect
+        print(2)
         result2 = await conn2.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)
+
         assert result2.contents == 42
 
         await router1.shutdown()
         await router2.shutdown()
 
     asyncio.run(run_add_one_test())
+
+
+# NEXT
+# add timers
+#   - e.g. keep retrying message every 100ms for up to a 2s connection timeout
+#   - initial 2s heatbeat, with exponential backoff up to 16s or whatever
+#   - single event timer
+
+# test trying to send one plus messages to a non-existent IPC and TCP address results in MSG_NOT_DELIVERED when
+# awaiting connection timeout elapses
 
 
 def main():

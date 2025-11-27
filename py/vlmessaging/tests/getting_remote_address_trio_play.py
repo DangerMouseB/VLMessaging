@@ -10,17 +10,22 @@
 # to establish the identity of the remote peer connected to a pipe
 
 # Python imports
-import argparse, pynng, asyncio, os
+import argparse, pynng, trio
+import os
 
-# VLMessaging imports
-from vlmessaging.utils import until
+try:
+    run_sync = trio.to_thread.run_sync
+except AttributeError:
+    # versions of trio prior to 0.12.0 used this method
+    run_sync = trio.run_sync_in_worker_thread
 
 
 class Router:
 
-    __slots__ = ('_sock', 'addr', 'routerId', '_pipeByPipeId', '_pipeIdByRouterId', '_routerIdByPipeId', 'running')
+    __slots__ = ('_n', '_sock', 'addr', 'routerId', '_pipeByPipeId', '_pipeIdByRouterId', '_routerIdByPipeId', 'running')
 
-    def __init__(self, listen_addr, *connect_addrs):
+    def __init__(self, n, listen_addr, *connect_addrs):
+        self._n = n
         self.routerId = os.getpid()
         self._pipeByPipeId = {}
         self._pipeIdByRouterId = {}
@@ -35,13 +40,14 @@ class Router:
         for addr in connect_addrs:
             dialer = self._sock.dial(addr)
         self.running = True
-        asyncio.create_task(self.recv_eternally())
-        asyncio.create_task(self.send_eternally())
+        n.start_soon(self.recv_eternally, self._sock)
+        n.start_soon(self.send_eternally, self._sock)
 
     def post_connect_cb(self, pipe):
         try:
             # send my router id to the remote peer as the first message on this pipe
-            pipe.socket.send(str(self.routerId).encode(), block=False)
+            msg = pynng.Message(str(self.routerId).encode(), pipe)
+            pipe.socket.send_msg(msg, block=False)
         except Exception as ex:
             print(repr(ex))
         self._pipeByPipeId[pipe.id] = pipe
@@ -57,20 +63,20 @@ class Router:
             print(f'disconnected: <{pipe.local_address}::{pipe.id}>')
         self._pipeByPipeId.pop(pipe.id, None)
 
-    async def send_eternally(self):
+    async def send_eternally(self, sock):
         while self.running:
-            stuff = await asyncio.to_thread(input)
+            stuff = await run_sync(input)
             if stuff == 'quit':
                 self.running = False
                 await self._sock.close()
-            for pipe in self._sock.pipes:
+            for pipe in sock.pipes:
                 routerId = self._routerIdByPipeId[pipe.id]
                 print(f'Sending "{stuff}" to <{routerId}> aka <{pipe.remote_address}::{pipe.id}>')
                 await pipe.asend(stuff.encode())
 
-    async def recv_eternally(self):
+    async def recv_eternally(self, sock):
         while self.running:
-            msg = await self._sock.arecv_msg()
+            msg = await sock.arecv_msg()
             pipeId = msg.pipe.id
             content = msg.bytes.decode()
             routerId = self._routerIdByPipeId.get(pipeId, None)
@@ -90,34 +96,27 @@ async def main():
         connectTo = ['ipc:///tmp/sally']
         # connectTo = []
     else:
-        try:
-            p = argparse.ArgumentParser(description=__doc__)
-            p.add_argument(
-                "listenOn",
-                help="Address to listen; e.g. tcp://127.0.0.1:13134",
-            )
-            p.add_argument(
-                "connectTo",
-                nargs='*',
-                help="Address to dial; e.g. tcp://127.0.0.1:13134",
-            )
-            args = p.parse_args()
-            listenOn = args.listenOn
-            connectTo = args.connectTo
-        except:
-            listenOn = input()
-            connectTo = input()
-            listenOn = f'ipc:///tmp/{listenOn}'
-            connectTo = f'ipc:///tmp/{connectTo}'
+        p = argparse.ArgumentParser(description=__doc__)
+        p.add_argument(
+            "listenOn",
+            help="Address to listen or dial; e.g. tcp://127.0.0.1:13134",
+        )
+        p.add_argument(
+            "connectTo",
+            nargs='*',
+            help="Address to listen or dial; e.g. tcp://127.0.0.1:13134",
+        )
+        args = p.parse_args()
+        listenOn = args.listenOn
+        connectTo = args.connectTo
 
-    r = Router(listenOn, connectTo)
-    await until(r.shutdown)
-    print('done')
+    async with trio.open_nursery() as n:
+        l = Router(n, listenOn, *connectTo)
 
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        trio.run(main)
     except KeyboardInterrupt:
         pass
