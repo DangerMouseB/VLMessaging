@@ -64,6 +64,8 @@ async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
     else:
         return [], []
 
+def startEventLoopWith(fn):
+    asyncio.run(fn())
 
 def taskOnEvent(ev):
     async def _(ev):
@@ -139,5 +141,4 @@ def monotonicTimeMs():
         return asyncio.get_running_loop().time() * 1000
     except RuntimeError:
         return time.monotonic() * 1000
-
 

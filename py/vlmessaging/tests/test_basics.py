@@ -7,100 +7,91 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
-# Python imports
-import asyncio
+# vlmessaging imports
+from vlmessaging import Msg, Addr, Router, VLM, utils
 
 # local imports
-from vlmessaging import Msg, Addr, Router, VLM
 from vlmessaging._core import _msgFromBytes, _msgAsBytes
 
 
 def test_serialise():
-    msg = Msg(Addr(None, 1, 3), 'TEST', dict(hello='world'))
-    msg.fromAddr = Addr(None, 1, 2)
-    msg._msgId = 1
-    bytes = _msgAsBytes(msg)
+    msg1 = Msg(Addr(None, 1, 3), 'TEST', dict(hello='world'))
+    msg1.fromAddr = Addr(None, 1, 2)
+    msg1._msgId = 1
+    bytes = _msgAsBytes(msg1)
     msg2 = _msgFromBytes(bytes)
-    msg2.contents = dict(msg2.contents)
-    msg2.meta = dict(msg2.meta)
-    assert msg.toAddr == msg2.toAddr
-    assert msg.fromAddr == msg2.fromAddr
-    assert msg.subject == msg2.subject
-    assert msg._msgId == msg2._msgId
-    assert msg._replyId == msg2._replyId
+    assert msg1.toAddr == msg2.toAddr
+    assert msg1.fromAddr == msg2.fromAddr
+    assert msg1.subject == msg2.subject
+    assert msg1._msgId == msg2._msgId
+    assert msg1._replyId == msg2._replyId
+    assert msg1.contents == msg2.contents
+    assert msg1.meta == msg2.meta
 
 
+class AddOneAgent:
+    def __init__(self, router):
+        self.conn = router.newConnection(self.msgArrived)
 
-def test_messaging():
+    async def msgArrived(self, msg):
+        if msg.subject == 'ADD_ONE':
+            await self.conn.send(msg.reply(msg.contents + 1))
+        else:
+            raise NotImplementedError()
 
-    # test that sending to a non-existent connection returns MSG_NOT_DELIVERED
-    # test that unawaited sending to a connection with no handler returns MSG_NOT_DELIVERED
-    # test that awaited sending to a connection with no handler gets handled as a reply
-    # test that dropped connections are cleaned up properly
-    # test VLM.IGNORE_UNHANDLED_REPLIES
-    # test VLM.HANDLE_DOES_NOT_UNDERSTAND
 
-    # msg = Msg(toAddr, "FRED", None)
-    # res = await conn.send(msg, 5000)
+def test_local():
 
     async def run_add_one_test():
-        router = Router(False)
-        router2 = Router(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False)
-        x1 = router.newConnection()
-        x2 = router.newConnection(lambda m: None)
+        router = Router(mode=VLM.LOCAL_MODE, name='fred')
+        fred = AddOneAgent(router)
+        conn = router.newConnection()
+        reply = await conn.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)
 
-        result1 = await conn.send(Msg(conn.addr, 'GET_FRED', None), 500)
-        if result1:
-            _PPMsg(f'Got', f'{result1.subject} = {result1.contents}')
-        else:
-            print('Timedout waiting for a result')
-        x1 = x2 = None
+        assert reply.contents == 42
 
-        result2 = await conn.send(Msg(conn.addr, 'ADD_ONE_TO_CURRENT', None), 500)
+        router.shutdown()
+        await utils.until(router.hasShutdown)
 
-        if result2:
-            _PPMsg(f'Got', f'{result2.subject} = {result2.contents}')
-        else:
-            print('Timedout waiting for a result')
+    utils.startEventLoopWith(run_add_one_test)
 
-        await router.shutdown()
-
-        return f'{result1.subject} = {result1.contents}', result2.contents
-
-    result1, result2 = asyncio.run(run_add_one_test())
-    assert result1 == 'DOES_NOT_UNDERSTAND = GET_FRED'
-    assert result2 == 42
 
 
 def test_ipc():
 
-    class Fred:
-        def __init__(self, router):
-            self.conn = router.newConnection(self.msgArrived)
-
-        async def msgArrived(self, msg):
-            if msg.subject == 'ADD_ONE':
-                await self.conn.send(msg.reply(msg.contents + 1))
-            else:
-                raise NotImplementedError()
-
     async def run_add_one_test():
         router1 = Router(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False, name='fred')
         router2 = Router(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False, name='joe')
-        fred = Fred(router1)
-        conn2 = router2.newConnection()
+        fred = AddOneAgent(router1)
+        conn = router2.newConnection()
+        reply = await conn.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)
 
-        print(1)
-        result1 = await conn2.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)   # give time for routers to connect
-        print(2)
-        result2 = await conn2.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)
+        assert reply.contents == 42
 
-        assert result2.contents == 42
+        router1.shutdown()
+        router2.shutdown()
+        await utils.until((router1.hasShutdown, router2.hasShutdown))
 
-        await router1.shutdown()
-        await router2.shutdown()
+    utils.startEventLoopWith(run_add_one_test)
 
-    asyncio.run(run_add_one_test())
+
+
+def test_tcp():
+
+    async def run_add_one_test():
+        router1 = Router(mode=VLM.NETWORK_MODE, canRunLocalHubDirectory=False, name='fred')
+        router2 = Router(mode=VLM.NETWORK_MODE, canRunLocalHubDirectory=False, name='joe')
+        fred = AddOneAgent(router1)
+        conn = router2.newConnection()
+        reply = await conn.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)
+
+        assert reply.contents == 42
+
+        router1.shutdown()
+        router2.shutdown()
+        await utils.until((router1.hasShutdown, router2.hasShutdown))
+
+    utils.startEventLoopWith(run_add_one_test)
 
 
 # NEXT
@@ -112,11 +103,24 @@ def test_ipc():
 # test trying to send one plus messages to a non-existent IPC and TCP address results in MSG_NOT_DELIVERED when
 # awaiting connection timeout elapses
 
+# test that sending to a non-existent connection returns MSG_NOT_DELIVERED
+# test that unawaited sending to a connection with no handler returns MSG_NOT_DELIVERED
+# test that awaited sending to a connection with no handler gets handled as a reply
+# test that dropped connections are cleaned up properly
+# test VLM.IGNORE_UNHANDLED_REPLIES
+# test VLM.HANDLE_DOES_NOT_UNDERSTAND
+
+# msg = Msg(toAddr, "FRED", None)
+# res = await conn.send(msg, 5000)
+
+# check shutdown works properly in debug in PyCharm - used to have an asyncio.sleep(0.1) in Router.shutdown that may have helped?
+
 
 def main():
+    test_serialise()
+    test_local()
     test_ipc()
-    # test_serialise()
-    # test_messaging() - wip
+    # test_tcp()
     print('passed')
 
 

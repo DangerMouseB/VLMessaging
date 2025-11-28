@@ -332,10 +332,9 @@ class Router:
     def newConnection(self, fn=Missing):
         return self._newConnection(next(self._connectionIdSeed), fn)
 
-    async def shutdown(self):
+    def shutdown(self):
         self._connectionById = {}
         self._isShuttingDown.set()
-        await until(timeout=10)  # do this here so the client doesn't have to - annoyingly we can't loop until done
         self._hasShutdown.set()
 
     @property
@@ -757,11 +756,7 @@ def _msgAsBytes(msg):
     simpleion.dump(msg.fromAddr.machineId, bytes, binary=True)          # string or None
     simpleion.dump(msg.fromAddr.routerId, bytes, binary=True)           # int
     simpleion.dump(msg.fromAddr.connectionId, bytes, binary=True)       # int
-    # if msg.toAddr == VLM.PUB:
-    #     simpleion.dump(None, bytes, binary=True)
-    #     simpleion.dump(None, bytes, binary=True)
-    # else:
-    simpleion.dump(msg.toAddr.machineId, bytes, binary=True)            # string
+    simpleion.dump(msg.toAddr.machineId, bytes, binary=True)            # string or None
     simpleion.dump(msg.toAddr.routerId, bytes, binary=True)             # int
     simpleion.dump(msg.toAddr.connectionId, bytes, binary=True)         # int
     simpleion.dump(msg.subject, bytes, binary=True)                     # string
@@ -775,31 +770,19 @@ def _msgFromBytes(bytes):
     try:
         values = simpleion.load(io.BytesIO(bytes), single_value=False)
         schema, fromMachineId, fromRouterId, fromConnId, toMachineId, toRouterId, toConnId, subject, _msgId, _replyId, contents, meta = values
-        schema = _toPyType(schema)
-        fromMachineId = _toPyType(fromMachineId)
-        fromRouterId = _toPyType(fromRouterId)
-        fromConnId = _toPyType(fromConnId)
-        toMachineId = _toPyType(toMachineId)
-        toRouterId = _toPyType(toRouterId)
-        toConnId = _toPyType(toConnId)
-        subject = _toPyType(subject)
-        _msgId = _toPyType(_msgId)
-        _replyId = _toPyType(_replyId)
-        contents = _toPyType(contents)
-        meta = _toPyType(meta)
-        assert schema == '1'
-        msg = Msg(Addr(toMachineId, toRouterId, toConnId), subject, contents)
-        msg.fromAddr = Addr(fromMachineId, fromRouterId, fromConnId)
-        msg._msgId = _msgId
-        msg._replyId = _replyId
-        msg.meta = meta
+        assert _toPy(schema) == '1'
+        msg = Msg(Addr(_toPy(toMachineId), _toPy(toRouterId), _toPy(toConnId)), _toPy(subject), _toPy(contents))
+        msg.fromAddr = Addr(_toPy(fromMachineId), _toPy(fromRouterId), _toPy(fromConnId))
+        msg._msgId = _toPy(_msgId)
+        msg._replyId = _toPy(_replyId)
+        msg.meta = _toPy(meta)
         # OPEN: assert stream at end
         return msg
     except Exception as ex:
         _PPMsg('_msgFromBytes error', repr(ex))
         raise
 
-def _toPyType(x):
+def _toPy(x):
     if isinstance(x, simpleion.IonPyInt):
         return int(x)
     elif isinstance(x, simpleion.IonPyFloat):
@@ -809,11 +792,14 @@ def _toPyType(x):
     elif isinstance(x, simpleion.IonPyText):
         return str(x)
     elif isinstance(x, simpleion.IonPyList):
-        return [_toPyType(y) for y in x]
+        return [_toPy(y) for y in x]
     elif isinstance(x, simpleion.IonPyDict):
-        return {_toPyType(k):_toPyType(v) for k, v in x.items()}
+        return {_toPy(k):_toPy(v) for k, v in x.items()}
     elif isinstance(x, simpleion.IonPyNull):
         return None
+    elif isinstance(x, (str, int, float, bool)):
+        _PPMsg('_toPy warning', f'primitive type "{type(x)}" passed through unchanged.')
+        return x
     else:
         raise ProgrammerError(f'Unknown ION type "{type(x)}".')
 
