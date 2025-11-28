@@ -28,6 +28,7 @@ from coppertop.utils import Missing
 from vlmessaging._core import _localPipeAddr
 
 MACHINE_MODE = 'MACHINE_MODE'
+_DEFAULT_LOCAL_CONNECTION_TIMESOUT = 2000
 
 
 class _MesagesAwaitingConnection:
@@ -45,23 +46,25 @@ class _MesagesAwaitingConnection:
 class FireSock:
 
     __slots__ = (
-        'routerId', '_sMachine', '_pipeByPipeId', '_pipeByRouterId', '_routerIdByPipeId', 'queuedMsgByName',
-        '_isShuttingDownTask', '_isShuttingDown', '_hasShutdown'
+        '_routerId', '_sMachine', '_pipeByRouterId', '_routerIdByPipeId', '_dialerByRouterId',
+        '_accumulatedMsgsByRouterId', '_isShuttingDownTask', '_isShuttingDown', '_hasShutdown'
     )
 
 
     # PUBLIC API
 
     def __init__(self, routerId):
-        self.routerId = Missing
-        self._pipeByPipeId = {}
+        self._routerId = Missing
+        self._sMachine = Missing
         self._pipeByRouterId = {}
         self._routerIdByPipeId = {}
+        self._dialerByRouterId = {}
+        self._accumulatedMsgsByRouterId = {}
         self._isShuttingDown = asyncio.Event()
         self._hasShutdown = asyncio.Event()
         self._isShuttingDownTask = asyncio.create_task(self._isShuttingDown.wait())
-        self.queuedMsgByName = {}
-        self._listenForMachine(routerId)
+
+        self._listenForRouters(routerId)
         asyncio.create_task(self._mainLoop())
 
 
@@ -77,43 +80,42 @@ class FireSock:
 
     # MACHINE CONNECTION MANAGEMENT
 
-    def _listenForMachine(self, routerId):
-        self.routerId = routerId
+    def _listenForRouters(self, routerId):
+        self._routerId = routerId
         self._sMachine = pynng.Pair1(polyamorous=True)
-        self._sMachine.add_post_pipe_connect_cb(self._onMachineConnect)
-        self._sMachine.add_post_pipe_remove_cb(self._onMachineDisconnect)
-        self._sMachine.listen(f'ipc:///tmp/{routerId}.ipc')
+        self._sMachine.add_post_pipe_connect_cb(self._onRouterConnect)
+        self._sMachine.add_post_pipe_remove_cb(self._onRouterDisconnect)
+        self._sMachine.listen(_ipcUrl(routerId))
 
+    def _dialRouter(self, routerId, timeout):
+        assert routerId not in self._accumulatedMsgsByRouterId
+        accumulatedMsgs = self._accumulatedMsgsByRouterId[routerId] = _MesagesAwaitingConnection(timeout)
+        self._dialerByRouterId[routerId] = dial(self._sMachine, _ipcUrl(routerId), block=False)
+        print(f'{self._routerId} dialing {routerId}')
+        return accumulatedMsgs
 
     # MACHINE SOCKET CALLBACKS
 
-    def _onMachineConnect(self, pipe):
+    def _onRouterConnect(self, pipe):
         connection_type = pipeConnectionType(pipe)
-        if connection_type == 'outgoing':
-            print(f'_onMachineConnect {self.routerId}: connection {connection_type} on channel {pipe.dialer.url}')
-        else:
-            print(f'_onMachineConnect {self.routerId}: connection {connection_type} on channel {pipe.listener.url}')
-        send(pipe, self.routerId.encode(), block=False)
-        self._pipeByPipeId[pipe.id] = pipe
+        print(f'_onRouterConnect {self._routerId}: connection {connection_type} on channel {pipe.url}')
+        send(pipe, self._routerId.encode(), block=False)
 
-    def _onMachineDisconnect(self, pipe):
+    def _onRouterDisconnect(self, pipe):
         routerId = self._routerIdByPipeId.get(pipe.id, 'unknown')
-        print(f'_onMachineDisconnect {self.routerId} disconnected from {routerId} on channel {pipe.url}')
+        print(f'_onRouterDisconnect {self._routerId} disconnected from {routerId} on channel {pipe.url}')
         
 
     # ROUTING
 
     def send(self, msg, routerId):
-        if self._pipeByRouterId.get(routerId, Missing) is Missing:
-            print(f'{self.routerId} dialing {routerId}')
-            dial(self._sMachine, f'ipc:///tmp/{routerId}.ipc', block=False)
         if (pipe := self._pipeByRouterId.get(routerId, Missing)) is Missing:
-            if (msgs := self.queuedMsgByName.get(routerId, Missing)) is Missing:
-                msgs = self.queuedMsgByName[routerId] = _MesagesAwaitingConnection(60_000)
-            msgs.queueMsg(msg)
+            if (accumulatedMsgs := self._accumulatedMsgsByRouterId.get(routerId, Missing)) is Missing:
+                accumulatedMsgs = self._dialRouter(routerId, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
+            accumulatedMsgs.queueMsg(msg)
         else:
-            print(f'{self.routerId} - sending "{msg}" to {routerId}')
-            send(pipe, msg.encode(), block=False)
+            print(f'{self._routerId} - sending "{msg}" to {routerId}')
+            asend(pipe, msg.encode())
 
 
     # MAIN LOOP
@@ -128,39 +130,39 @@ class FireSock:
         pending = []
         while running:
 
-            done, pending = await until(*detailsByTask.keys(), return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await until(detailsByTask.keys(), return_when=asyncio.FIRST_COMPLETED)
             for task in done:
+                # pull the done task from the queue
                 details = detailsByTask.pop(task)
                 if details == 'shutdown':
-                    print(f'{self.routerId} - shutting down')
+                    print(f'{self._routerId} - shutting down')
                     running = False
                     break
                 elif details == 'ipc':
                     msg = task.result()
                     pipe = msg.pipe
                     if pipe.id not in self._routerIdByPipeId:
-                        # first message on this pipe - must be the routerId of the remote peer
+                        # first message on this pipe is the routerId of the remote peer
                         routerId = msg.bytes.decode()
-                        if routerId in self._pipeByRouterId and pipeConnectionType(pipe) == 'outgoing':
-                            print(f'{self.routerId} - WARNING: already connected to {routerId} - overwriting previous connection')
+                        if routerId in self._pipeByRouterId:
+                            print(f'{self._routerId} - WARNING: already connected to {routerId} - overwriting previous connection')
                             self._routerIdByPipeId[pipe.id] = routerId
                             self._pipeByRouterId[routerId] = pipe
                         else:
                             self._routerIdByPipeId[pipe.id] = routerId
                             self._pipeByRouterId[routerId] = pipe
-                            assert self._pipeByPipeId[pipe.id] is pipe
-                            print(f'{self.routerId} receiving connection from {routerId}')
+                            print(f'{self._routerId} receiving connection from {routerId}')
                         # send any queued messages
-                        if (queuedMsgs := self.queuedMsgByName.pop(routerId, Missing)) is not Missing:
+                        if (queuedMsgs := self._accumulatedMsgsByRouterId.pop(routerId, Missing)) is not Missing:
                             for queuedMsg in queuedMsgs.msgs:
-                                print(f'{self.routerId} - sending queued "{queuedMsg}" to {routerId}')
-                                await asend(pipe, queuedMsg.encode())
+                                print(f'{self._routerId} - sending queued "{queuedMsg}" to {routerId}')
+                                asend(pipe, queuedMsg.encode())
                     else:
-                        ppMsg = f'{self.routerId} received: "{msg.bytes.decode()}" from: {self._routerIdByPipeId[pipe.id]}'
+                        ppMsg = f'{self._routerId} received: "{msg.bytes.decode()}" from: {self._routerIdByPipeId[pipe.id]}'
                         _msgLog.append(ppMsg)
                         print(ppMsg)
-                    # reissue the arecv task
-                    detailsByTask[arecv(self._sMachine)] = 'arecv'
+                    # reissue the ipc task
+                    detailsByTask[arecv(self._sMachine)] = details
 
         for t in pending:
             t.cancel()
@@ -168,7 +170,7 @@ class FireSock:
         for t in detailsByTask.keys():
             t.cancel()
             await until(timeout=0)
-        print(f'{self.routerId} - shutdown', '')
+        print(f'{self._routerId} - shutdown', '')
 
 
 
@@ -181,23 +183,23 @@ async def main():
     joe = FireSock('joe')
 
     print(1)
-    fred.send('hi', joe.routerId)
+    fred.send('hi', 'joe')
     # await asyncio.sleep(0.2)        # comment this out to see connection racing
 
     print(2)
-    joe.send('hello', fred.routerId)
+    joe.send('hello', 'fred')
     print(3)
-    fred.send('hi 2', joe.routerId)
+    fred.send('hi 2', 'joe')
     print(4)
-    joe.send('hello 2', fred.routerId)
+    joe.send('hello 2', 'fred')
 
     print(4)
     await asyncio.sleep(0.2)
 
     print(3)
-    fred.send('hi 3', joe.routerId)
+    fred.send('hi 3', 'joe')
     print(4)
-    joe.send('hello 3', fred.routerId)
+    joe.send('hello 3', 'fred')
 
     print(4)
     await asyncio.sleep(2)
@@ -240,12 +242,17 @@ def monotonicTimeMs():
     except RuntimeError:
         return time.monotonic() * 1000
 
+tDictKeys = type({}.keys())
+tDictValues = type({}.values())
+
 async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
     """Wraps any Event in awaitables in a Task then returns await asyncio.wait(...)."""
-    if len(awaitables) == 1 and isinstance(awaitables[0], (list, tuple, set)):
-        things = awaitables[0]
-    else:
-        things = awaitables
+    things = awaitables
+    if len(awaitables) == 1:
+        if isinstance(awaitables[0], (list, tuple, set)):
+            things = awaitables[0]
+        elif isinstance(awaitables[0], (tDictKeys, tDictValues)):
+            things = list(awaitables[0])
     things = [eventWaitingTask(thing) if isinstance(thing, asyncio.Event) else thing for thing in things]
     secs = timeout / 1000.0 if timeout else None
     if awaitables:
@@ -260,6 +267,9 @@ def eventWaitingTask(ev):
     async def _(ev):
         return await ev.wait()
     return asyncio.create_task(_(ev))
+
+def _ipcUrl(routerId):
+    return f'ipc:///tmp/router_{routerId!s}'
 
 
 asyncio.run(main())

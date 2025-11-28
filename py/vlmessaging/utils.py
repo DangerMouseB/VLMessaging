@@ -38,12 +38,17 @@ def with_async_init(cls):
     return cls
 
 
+tDictKeys = type({}.keys())
+tDictValues = type({}.values())
+
 async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
     """Wraps any Event in awaitables in a Task then returns await asyncio.wait(...)."""
-    if len(awaitables) == 1 and isinstance(awaitables[0], (list, tuple, set)):
-        things = awaitables[0]
-    else:
-        things = awaitables
+    things = awaitables
+    if len(awaitables) == 1:
+        if isinstance(awaitables[0], (list, tuple, set)):
+            things = awaitables[0]
+        elif isinstance(awaitables[0], (tDictKeys, tDictValues)):
+            things = list(awaitables[0])
     things = [eventWaitingTask(thing) if isinstance(thing, asyncio.Event) else thing for thing in things]
     secs = timeout / 1000.0 if timeout else None
     if awaitables:

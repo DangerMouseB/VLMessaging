@@ -246,14 +246,13 @@ class Router:
         '_sMachine',                  # socket for connections with other routers on this machine
         '_sHubIn',                  # socket for acting as the hub directory
         '_sHubOut',                 # socket for connecting to the hub directory - can be dropped if we become the hub directory
-        '_pipeByPipeId',            # when we get a new pipe we store it here
         '_pipeByRouterId',          # so we know which pipe to send a msg down
         '_routerIdByPipeId',        # so we know which router a msg has come from - not strictly required except for validating a from address?
         '_directory',
         '_canRunLocalHubDirectory',
         '_scheduledCallbacksByFnId',
-        '_queuedMsgByRouterId',     # to be checked periodically for connection, reply with unroutable on time out
-        '_dialerByAddress',        
+        '_accumulatedMsgsByRouterId',     # to be checked periodically for connection, reply with unroutable on time out
+        '_dialerByRouterId',
         # _pipeByMachineAndRouterId     # for a single hop - if not here then use the following
         # _pipeByMachineId              # for a two hop - machine id doesn't need to be a machine id could just be an IP
 
@@ -272,18 +271,18 @@ class Router:
         self._isShuttingDownTask = asyncio.create_task(self._isShuttingDown.wait())
 
         self._sMachine, self._sHubIn, self._sHubOut = Missing, Missing, Missing
-        self._pipeByPipeId, self._pipeByRouterId, self._routerIdByPipeId = {}, {}, {}
+        self._pipeByRouterId, self._routerIdByPipeId = {}, {}
         self._canRunLocalHubDirectory = canRunLocalHubDirectory
         self._scheduledCallbacksByFnId = {}
-        self._queuedMsgByRouterId = {}
-        self._dialerByAddress = {}
+        self._accumulatedMsgsByRouterId = {}
+        self._dialerByRouterId = {}
         self._routerId = 0
         self._name = name
 
         # figure the routerId and listen on a (local) socket
         if mode in (VLM.MACHINE_MODE, VLM.NETWORK_MODE):
             # OPEN: random number instead? any advantages or security concern about using pid?
-            self._listenForMachine(os.getpid())
+            self._listenForRouters(os.getpid())
 
             # initial attempt to connect to machine hub directory
             self._checkMachineHubConnection()
@@ -360,17 +359,17 @@ class Router:
 
     # MACHINE CONNECTION MANAGEMENT
 
-    def _listenForMachine(self, routerId):
+    def _listenForRouters(self, routerId):
         # create and setup _sMachine socket
-        self._routerId = os.getpid()
+        self._routerId = routerId
         self._sMachine = pynng.Pair1(polyamorous=True)
-        self._sMachine.add_post_pipe_connect_cb(self._onMachineConnect)
-        self._sMachine.add_post_pipe_remove_cb(self._onMachineDisconnect)
+        self._sMachine.add_post_pipe_connect_cb(self._onRouterConnect)
+        self._sMachine.add_post_pipe_remove_cb(self._onRouterDisconnect)
         i = 0
         while i < _MAX_IPC_LISTEN_ATTEMPTS:
             try:
-                self._sMachine.listen(_ipcAddr(self._routerId))
-                _PPMsg('Listening', f'{self._name or str(self._routerId)} - {_ipcAddr(self._routerId)}')
+                self._sMachine.listen(_ipcUrl(self._routerId))
+                _PPMsg('Listening', f'{self._name or str(self._routerId)} - {_ipcUrl(self._routerId)}')
                 break
             except pynng.exceptions.AddressInUse as ex:
                 self._routerId += 1
@@ -378,26 +377,25 @@ class Router:
         if i >= _MAX_IPC_LISTEN_ATTEMPTS:
             raise RuntimeError(f'Unable to find a free ipc address.')
 
-    def _startConnectingToLocal(self, routerId, timeout):
-        queuedMsgs = self._queuedMsgByRouterId[routerId] = _MesagesAwaitingConnection(timeout)
-        # self._refreshTasksToMonitor = True
-        addr = _ipcAddr(routerId)
-        self._dialerByAddress[addr] = dial(self._sMachine, addr, block=False)
-        _PPMsg('DialingLocal', f'{self._name} dialing {addr}')
-        return queuedMsgs
+    def _dialRouter(self, routerId, timeout):
+        assert routerId not in self._accumulatedMsgsByRouterId
+        accumulatedMsgs = self._accumulatedMsgsByRouterId[routerId] = _MesagesAwaitingConnection(timeout)
+        self._dialerByRouterId[routerId] = dial(self._sMachine, _ipcUrl(routerId), block=False)
+        _PPMsg('DialingRouter', f'{self._name} dialing {routerId}')
+        return accumulatedMsgs
 
     def _completeConnectingToLocal(self, msgsAwaitingConnection):
         # send all the queued messages awaiting connection to the newly connected router
         for msg in msgsAwaitingConnection.msgs():
             self._route(msg)
-        self._queuedMsgByRouterId.pop(msgsAwaitingConnection.routerId, None)
+        self._accumulatedMsgsByRouterId.pop(msgsAwaitingConnection.routerId, None)
         self._refreshTasksToMonitor = True
 
     def _cancelConnectingToLocal(self, routerId):
-        if (queuedMsgs := self._queuedMsgByRouterId.get(routerId, Missing)) is Missing: return
-        self._queuedMsgByRouterId.pop(routerId, None)
+        if (accumulatedMsgs := self._accumulatedMsgsByRouterId.get(routerId, Missing)) is Missing: return
+        self._accumulatedMsgsByRouterId.pop(routerId, None)
         self._refreshTasksToMonitor = True
-        for msg in queuedMsgs.msgs():
+        for msg in accumulatedMsgs.msgs():
             if msg.subject == VLM.MSG_NOT_DELIVERED:
                 # don't get into a loop of undeliverable messages
                 pass
@@ -413,7 +411,7 @@ class Router:
                 # try to become the machine hub directory
                 try:
                     s = pynng.Pair1(polyamorous=True)
-                    s.listen(_ipcAddr(_MACHINE_HUB_ROUTER_ID))
+                    s.listen(_ipcUrl(_MACHINE_HUB_ROUTER_ID))
                     s.add_post_pipe_connect_cb(self._onHubInConnect)
                     s.add_post_pipe_remove_cb(self._onHubInDisconnect)
                     self._sHubIn = s
@@ -424,34 +422,30 @@ class Router:
                 _sHubOut = pynng.Pair1(polyamorous=True)
                 _sHubOut.add_post_pipe_connect_cb(self._sHubOutPostConnectCb)
                 _sHubOut.add_post_pipe_remove_cb(self._sHubOutPostRemoveCb)
-                _sHubOut.dial(_ipcAddr(_MACHINE_HUB_ROUTER_ID), block=False)
+                _sHubOut.dial(_ipcUrl(_MACHINE_HUB_ROUTER_ID), block=False)
 
 
     # MACHINE SOCKET CALLBACKS
 
-    def _onMachineConnect(self, pipe):
-        _PPMsg('_onMachineConnect', f'{self._name}')
-        _PPMsg('_onMachineConnect', f'#1 {self._name} - {pipeConnectionType(pipe)} {_localPipeAddr(pipe)}')
+    def _onRouterConnect(self, pipe):
+        _PPMsg('_onRouterConnect', f'#1')
+        _PPMsg('_onRouterConnect', f'#2 {self._name} - {pipeConnectionType(pipe)} {_localPipeAddr(pipe)}')
         try:
             # send my router id to the remote peer as the first message on this pipe
             # comes in on a different thread so can't use event loop on main thread
             send(pipe, str(self._routerId).encode(), block=False)
         except Exception as ex:
-            _PPMsg('_onMachineConnect', f'#2 {self._name} exception - {repr(ex)}')
-        self._pipeByPipeId[pipe.id] = pipe
-        self._refreshTasksToMonitor = True
-        _PPMsg('_onMachineConnect', f'#3 {self._name}')
+            _PPMsg('_onRouterConnect', f'#err {self._name} exception - {repr(ex)}')
+        _PPMsg('_onRouterConnect', f'#3 {self._name}')
 
-    def _onMachineDisconnect(self, pipe):
-        _PPMsg('_onMachineDisconnect- 1', f'#1 {self._name} - {_localPipeAddr(pipe)}')
+    def _onRouterDisconnect(self, pipe):
+        _PPMsg('_onRouterDisconnect- 1', f'#1 {self._name} - {_localPipeAddr(pipe)}')
         routerId = self._routerIdByPipeId.pop(pipe.id, None)
         if routerId:
             self._pipeByRouterId.pop(routerId, None)
-            _PPMsg('_onMachineDisconnect', f'#2 {self._name} - <{routerId}> aka <{_localPipeAddr(pipe)}>')
+            _PPMsg('_onRouterDisconnect', f'#2 {self._name} - <{routerId}> aka <{_localPipeAddr(pipe)}>')
         else:
-            _PPMsg('_onMachineDisconnect', f'#3 {self._name} - {_localPipeAddr(pipe)}')
-        self._pipeByPipeId.pop(pipe.id, None)
-        self._refreshTasksToMonitor = True
+            _PPMsg('_onRouterDisconnect', f'#3 {self._name} - {_localPipeAddr(pipe)}')
 
     def _onHubInConnect(self, pipe):
         addr = str(pipe.remote_address)
@@ -506,13 +500,12 @@ class Router:
                         _PPMsg(f'unroutable', msg._msgId)
                         self._route(reply)
             else:
-                ipcRouterPipe = self._pipeByRouterId.get(routerId, Missing)
-                if ipcRouterPipe is Missing:
-                    if (queuedMsgs := self._queuedMsgByRouterId.get(routerId, Missing)) is Missing:
-                        queuedMsgs = self._startConnectingToLocal(routerId, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
-                    queuedMsgs.queueMsg(msg)
+                if (pipe := self._pipeByRouterId.get(routerId, Missing)) is Missing:
+                    if (accumulatedMsgs := self._accumulatedMsgsByRouterId.get(routerId, Missing)) is Missing:
+                        accumulatedMsgs = self._dialRouter(routerId, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
+                    accumulatedMsgs.queueMsg(msg)
                 else:
-                    asend(ipcRouterPipe, _msgAsBytes(msg))      # we might be able to await this instead but not sure we gain much
+                    asend(pipe, _msgAsBytes(msg))      # we might be able to await this instead but not sure we gain much
         else:
             # OPEN: handle inter-machine routing
             raise NotYetImplemented('inter-machine routing')
@@ -530,34 +523,34 @@ class Router:
         # To prevent starvation we schedule them fairly by moving a task that has just been processed to the end of the
         # list thus silent tasks bubble to the front. This is mildly wasteful since silent tasks need to be checked
         # each loop, but it does ensure that busy tasks don't dominate things.
-        taskToMonitorMap = {self._isShuttingDownTask: Monitor(_SHUTDOWN_EVENT, None)}
+        detailsByTask = {self._isShuttingDownTask: Monitor(_SHUTDOWN_EVENT, None)}
         running = True
         pending = []
-        _PPMsg(f'_mainLoop', f'{self._name}')
+        _PPMsg(f'_mainLoop', f'{self._name} - entering')
         while running:
             if self._refreshTasksToMonitor:
                 # remove old tasks that are no longer needed
                 tasksToRemove = []
-                for t, m in taskToMonitorMap.items():
+                for t, m in detailsByTask.items():
                     if m.type == _INBOX_EVENT and m.args not in self._connectionById: tasksToRemove.append(t)   # drop closed connections
                 for t in tasksToRemove:
                     # _PPMsg(f'dropping', f'{tasksToRemove[t]}')
                     t.cancel('no longer needed')
                     await until(timeout=0)
                     # t.uncancel()    # "in cases when suppressing asyncio.CancelledError is truly desired, it is necessary to also call uncancel()"
-                    taskToMonitorMap.pop(t)
+                    detailsByTask.pop(t)
                 await asyncio.gather(*tasksToRemove, return_exceptions=True)
 
                 # add new tasks that are needed
                 # inboxes
                 for cId, conn in self._connectionById.items():
-                    if Monitor(_INBOX_EVENT, cId) not in taskToMonitorMap.values():
-                        taskToMonitorMap[adequeue(self._inboxById[cId])] = Monitor(_INBOX_EVENT, cId)
+                    if Monitor(_INBOX_EVENT, cId) not in detailsByTask.values():
+                        detailsByTask[adequeue(self._inboxById[cId])] = Monitor(_INBOX_EVENT, cId)
                         _PPMsg(f'monitoring', f'{self._name} - {Monitor(_INBOX_EVENT, cId)}')
 
                 # ipc sockets
-                if self._sMachine and Monitor(_IPC_EVENT, 0) not in taskToMonitorMap.values():
-                    taskToMonitorMap[arecv(self._sMachine)] = Monitor(_IPC_EVENT, 0)
+                if self._sMachine and Monitor(_IPC_EVENT, 0) not in detailsByTask.values():
+                    detailsByTask[arecv(self._sMachine)] = Monitor(_IPC_EVENT, 0)
                     _PPMsg(f'monitoring', f'{self._name} - {Monitor(_IPC_EVENT, 0)}')
 
                 # connecting ipc sockets
@@ -571,61 +564,72 @@ class Router:
 
                 # scheduled callbacks
                 # for fnId, cb in self._scheduledCallbacksByFnId.items():
-                #     if (_TIMER_EVENT, fnId) not in taskToMonitorMap.values():
-                #         taskToMonitorMap[asyncio.create_task(self._pipeByRouterId[routerId].get())] = Monitor(_TIMER_EVENT, fnId)  # add any new pic pipes
+                #     if (_TIMER_EVENT, fnId) not in detailsByTask.values():
+                #         detailsByTask[asyncio.create_task(self._pipeByRouterId[routerId].get())] = Monitor(_TIMER_EVENT, fnId)  # add any new pic pipes
 
                 self._refreshTasksToMonitor = False
 
             # wait for a task to complete
             _PPMsg(f'mainloop', f'{self._name} - awaiting tasks')
-            done, pending = await asyncio.wait(taskToMonitorMap.keys(), return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await until(detailsByTask.keys(), return_when=asyncio.FIRST_COMPLETED)
             _PPMsg(f'mainloop', f'{self._name} - got {len(done)}')
 
             # process done tasks (always just one?)
             for task in done:
                 # pull the done task from the queue
-                m = taskToMonitorMap.pop(task)
-                if m.type == _SHUTDOWN_EVENT:
+                details = detailsByTask.pop(task)
+                if details.type == _SHUTDOWN_EVENT:
                     running = False
                     break
-                elif m.type == _INBOX_EVENT:
-                    cId = m.args
+                elif details.type == _INBOX_EVENT:
+                    cId = details.args
                     msg = task.result()
                     if (conn := self._connectionById.get(cId, Missing)) is not Missing:
                         inbox = self._inboxById[cId]
                         # we need to schedule a new task here rather than await otherwise we block processing other events
                         asyncio.create_task(conn._deliver(msg))
-                        taskToMonitorMap[asyncio.create_task(inbox.get())] = m              # add new task to end of queue
-                elif m.type == _IPC_EVENT:
+                        detailsByTask[asyncio.create_task(inbox.get())] = details              # add new task to end of queue
+                elif details.type == _IPC_EVENT:
                     _PPMsg('IPC_EVENT', f'')
                     msg = task.result()
-                    pipeId = msg.pipe.id
-                    routerId = self._routerIdByPipeId.get(pipeId, None)
-                    if routerId is None:
-                        # first message from the remote peer on this pipe is its routerId
-                        content = msg.bytes.decode()
-                        routerId = int(content)
-                        self._routerIdByPipeId[pipeId] = routerId
-                        _PPMsg('resolved', f'<{_localPipeAddr(msg.pipe)}> to <{routerId}>')
+                    pipe = msg.pipe
+                    if pipe.id not in self._routerIdByPipeId:
+                        # first message on this pipe is the routerId of the remote peer
+                        routerId = int(msg.bytes.decode())
+                        # self._routerIdByPipeId[pipe.id] = routerId
+                        # _PPMsg('resolved', f'<{_localPipeAddr(msg.pipe)}> to <{routerId}>')
+                        if routerId in self._pipeByRouterId:
+                            print(f'{self._routerId} - WARNING: already connected to {routerId} - overwriting previous connection')
+                            self._routerIdByPipeId[pipe.id] = routerId
+                            self._pipeByRouterId[routerId] = pipe
+                        else:
+                            self._routerIdByPipeId[pipe.id] = routerId
+                            self._pipeByRouterId[routerId] = pipe
+                            print(f'{self._routerId} receiving connection from {routerId}')
+                        # send any queued messages
+                        if (queuedMsgs := self._accumulatedMsgsByRouterId.pop(routerId, Missing)) is not Missing:
+                            for queuedMsg in queuedMsgs.msgs:
+                                print(f'{self._routerId} - sending queued "{queuedMsg}" to {routerId}')
+                                asend(pipe, queuedMsg.encode())
                     else:
                         msg = _msgFromBytes(msg.bytes)
                         self._route(msg)
-                    taskToMonitorMap[arecv(self._sMachine)] = m     # add new task to end of queue
-                elif m.type == _AWAITING_CONNECTION_TIMER_EVENT:
+                    detailsByTask[arecv(self._sMachine)] = details     # add new task to end of queue
+                elif details.type == _AWAITING_CONNECTION_TIMER_EVENT:
                     raise NotYetImplemented('_AWAITING_CONNECTION_TIMER_EVENT')
-                    # _queuedMsgByRouterId
-                elif m.type == _TCP_EVENT:
+                    # _accumulatedMsgsByRouterId
+                elif details.type == _TCP_EVENT:
                     raise NotYetImplemented('_TCP_EVENT')
-                elif m.type == _TIMER_EVENT:
-                    fnId = m.args
+                elif details.type == _TIMER_EVENT:
+                    fnId = details.args
                     raise NotYetImplemented('_TIMER_EVENT')
                 else:
-                    raise ProgrammerError(f'Unknown monitor type "{m.type}".')
+                    raise ProgrammerError(f'Unknown monitor type "{details.type}".')
 
         for t in pending:
             t.cancel()
             await until(timeout=0)
-        for t in taskToMonitorMap.keys():
+        for t in detailsByTask.keys():
             t.cancel()
             await until(timeout=0)
         _PPMsg('shutdown', '')
@@ -776,7 +780,7 @@ def _PPMsg(prefix, msg):
 # Utils
 # **********************************************************************************************************************
 
-def _ipcAddr(pid):
+def _ipcUrl(pid):
     return f'ipc:///tmp/router_{pid}'
 
 def _tcpAddr(ip, port):
