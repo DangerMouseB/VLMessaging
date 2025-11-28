@@ -15,19 +15,18 @@
 # 2b) or could await a random period and drop any duplicate connections, eventually after a false start or two we
 #    should get into a steady state
 
-# need a STOP_DIALING_ME_AND_CLOSE message
+# OPEN: implement STOP_DIALING_ME_AND_CLOSE message
 
 
 # Python imports
-import pynng, asyncio, threading, time
+import pynng, asyncio, time
 
 # coppertop imports
 from coppertop.utils import Missing
 
-# local imports
-from vlmessaging._core import _localPipeAddr
 
 MACHINE_MODE = 'MACHINE_MODE'
+_STOP_DIALING_ME_AND_CLOSE = "STOP_DIALING_ME_AND_CLOSE"
 _DEFAULT_LOCAL_CONNECTION_TIMESOUT = 2000
 
 
@@ -46,8 +45,8 @@ class _MesagesAwaitingConnection:
 class FireSock:
 
     __slots__ = (
-        '_routerId', '_sMachine', '_pipeByRouterId', '_routerIdByPipeId', '_dialerByRouterId',
-        '_accumulatedMsgsByRouterId', '_isShuttingDownTask', '_isShuttingDown', '_hasShutdown'
+        '_routerId', '_sMachine', '_pipeByRouterId', '_routerIdByPipeId', '_dialerByRouterId', '_accumulatedMsgsByRouterId',
+        '_taskListChanged', '_isShuttingDownTask', '_isShuttingDown', '_hasShutdown'
     )
 
 
@@ -60,6 +59,8 @@ class FireSock:
         self._routerIdByPipeId = {}
         self._dialerByRouterId = {}
         self._accumulatedMsgsByRouterId = {}
+
+        self._taskListChanged = asyncio.Event()
         self._isShuttingDown = asyncio.Event()
         self._hasShutdown = asyncio.Event()
         self._isShuttingDownTask = asyncio.create_task(self._isShuttingDown.wait())
@@ -86,24 +87,26 @@ class FireSock:
         self._sMachine.add_post_pipe_connect_cb(self._onRouterConnect)
         self._sMachine.add_post_pipe_remove_cb(self._onRouterDisconnect)
         self._sMachine.listen(_ipcUrl(routerId))
+        self._taskListChanged.set()
 
     def _dialRouter(self, routerId, timeout):
         assert routerId not in self._accumulatedMsgsByRouterId
         accumulatedMsgs = self._accumulatedMsgsByRouterId[routerId] = _MesagesAwaitingConnection(timeout)
         self._dialerByRouterId[routerId] = dial(self._sMachine, _ipcUrl(routerId), block=False)
-        print(f'{self._routerId} dialing {routerId}')
+        _PPMsg('DialingRouter', f'{self._routerId} dialing {routerId}')
         return accumulatedMsgs
 
     # MACHINE SOCKET CALLBACKS
 
     def _onRouterConnect(self, pipe):
         connection_type = pipeConnectionType(pipe)
-        print(f'_onRouterConnect {self._routerId}: connection {connection_type} on channel {pipe.url}')
+        _PPMsg('RouterConnect', f'{self._routerId}: connection {connection_type} on channel {pipe.url}')
         send(pipe, self._routerId.encode(), block=False)
 
     def _onRouterDisconnect(self, pipe):
-        routerId = self._routerIdByPipeId.get(pipe.id, 'unknown')
-        print(f'_onRouterDisconnect {self._routerId} disconnected from {routerId} on channel {pipe.url}')
+        routerId = self._routerIdByPipeId.pop(pipe.id, 'unknown')
+        _PPMsg('RouterDisconnect', f'{self._routerId} disconnected from {routerId} on channel {pipe.url}')
+        self._pipeByRouterId.pop(routerId, None)
         
 
     # ROUTING
@@ -115,30 +118,28 @@ class FireSock:
             accumulatedMsgs.queueMsg(msg)
         else:
             print(f'{self._routerId} - sending "{msg}" to {routerId}')
-            asend(pipe, msg.encode())
+            cosend(pipe, msg.encode())
 
 
     # MAIN LOOP
 
     async def _mainLoop(self):
         # monitor the socket and the shutdown event
-        detailsByTask = {
+        taskList = {
             self._isShuttingDownTask: 'shutdown',
-            arecv(self._sMachine): 'ipc',
+            taskOnEvent(self._taskListChanged): 'tasklist',
         }
         running = True
         pending = []
         while running:
-
-            done, pending = await until(detailsByTask.keys(), return_when=asyncio.FIRST_COMPLETED)
+            try:
+                done, pending = await until(taskList.keys(), return_when=asyncio.FIRST_COMPLETED)
+            except Exception as ex:
+                raise
             for task in done:
-                # pull the done task from the queue
-                details = detailsByTask.pop(task)
-                if details == 'shutdown':
-                    print(f'{self._routerId} - shutting down')
-                    running = False
-                    break
-                elif details == 'ipc':
+                details = taskList.pop(task)                                           # take task from list
+
+                if details == 'ipc':
                     msg = task.result()
                     pipe = msg.pipe
                     if pipe.id not in self._routerIdByPipeId:
@@ -156,21 +157,35 @@ class FireSock:
                         if (queuedMsgs := self._accumulatedMsgsByRouterId.pop(routerId, Missing)) is not Missing:
                             for queuedMsg in queuedMsgs.msgs:
                                 print(f'{self._routerId} - sending queued "{queuedMsg}" to {routerId}')
-                                asend(pipe, queuedMsg.encode())
+                                cosend(pipe, queuedMsg.encode())
                     else:
                         ppMsg = f'{self._routerId} received: "{msg.bytes.decode()}" from: {self._routerIdByPipeId[pipe.id]}'
                         _msgLog.append(ppMsg)
                         print(ppMsg)
-                    # reissue the ipc task
-                    detailsByTask[arecv(self._sMachine)] = details
+                    taskList[corecv(self._sMachine)] = details                         # add task to bottom of list
+
+                elif details == 'tasklist':
+                    if self._sMachine and 'ipc' not in taskList.values():
+                        taskList[corecv(self._sMachine)] = 'ipc'
+                        _PPMsg(f'TaskList', f'adding ipc on {self._routerId}')
+                    self._taskListChanged.clear()
+                    taskList[task] = details
+
+                elif details == 'shutdown':
+                    _PPMsg(f'ShuttingDown', f'{self._routerId}')
+                    running = False
+                    break
+
+                else:
+                    raise ValueError(f'Unknown monitor type "{details.type}".')
 
         for t in pending:
             t.cancel()
             await until(timeout=0)
-        for t in detailsByTask.keys():
+        for t in taskList.keys():
             t.cancel()
             await until(timeout=0)
-        print(f'{self._routerId} - shutdown', '')
+        _PPMsg(f'ShutDown', f'{self._routerId}')
 
 
 
@@ -214,7 +229,7 @@ async def main():
     print('done')
 
 
-def arecv(s):
+def corecv(s):
     return asyncio.create_task(s.arecv_msg())
 
 def dial(s, addr, *, block):
@@ -232,7 +247,7 @@ def send(p, bytes, *, block):
     assert not isinstance(bytes, str)
     p.socket.send_msg(pynng.Message(bytes, p), block)
 
-def asend(p, bytes):
+def cosend(p, bytes):
     return asyncio.create_task(p.asend(bytes))
 
 def monotonicTimeMs():
@@ -253,7 +268,7 @@ async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
             things = awaitables[0]
         elif isinstance(awaitables[0], (tDictKeys, tDictValues)):
             things = list(awaitables[0])
-    things = [eventWaitingTask(thing) if isinstance(thing, asyncio.Event) else thing for thing in things]
+    things = [taskOnEvent(thing) if isinstance(thing, asyncio.Event) else thing for thing in things]
     secs = timeout / 1000.0 if timeout else None
     if awaitables:
         return await asyncio.wait(things, timeout=secs, return_when=return_when)
@@ -263,13 +278,15 @@ async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
     else:
         return [], []
 
-def eventWaitingTask(ev):
-    async def _(ev):
-        return await ev.wait()
-    return asyncio.create_task(_(ev))
+def taskOnEvent(ev):
+    return asyncio.create_task(ev.wait())
 
 def _ipcUrl(routerId):
     return f'ipc:///tmp/router_{routerId!s}'
+
+def _PPMsg(prefix, msg):
+    print(f'{prefix + ":":<17} {msg}')
+    return msg
 
 
 asyncio.run(main())

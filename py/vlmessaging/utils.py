@@ -38,6 +38,11 @@ def with_async_init(cls):
     return cls
 
 
+# Async concepts - Task
+# Async objects - OneOffEvent (function), EventSource (Timer, Queue, Socket)
+# Async operations - await single, await multiple (until), inBackgroundDo / addToLoop / do / schedule / add
+
+
 tDictKeys = type({}.keys())
 tDictValues = type({}.values())
 
@@ -49,7 +54,7 @@ async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
             things = awaitables[0]
         elif isinstance(awaitables[0], (tDictKeys, tDictValues)):
             things = list(awaitables[0])
-    things = [eventWaitingTask(thing) if isinstance(thing, asyncio.Event) else thing for thing in things]
+    things = [taskOnEvent(thing) if isinstance(thing, asyncio.Event) else thing for thing in things]
     secs = timeout / 1000.0 if timeout else None
     if awaitables:
         return await asyncio.wait(things, timeout=secs, return_when=return_when)
@@ -60,25 +65,25 @@ async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
         return [], []
 
 
-def eventWaitingTask(ev):
+def taskOnEvent(ev):
     async def _(ev):
         return await ev.wait()
-    return asyncio.create_task(_(ev))
-
+    return asyncio.create_task(ev.wait())
+    # return asyncio.create_task(_(ev))
 
 def Queue():
     return asyncio.Queue()
 
-def queue(q, x) -> Void:
+def pushBack(q, x) -> Void:
     q.put_nowait(x)
 
-def adequeue(q):
+def coPopFront(q):
     return asyncio.create_task(q.get())
 
-def arecv(s):
+def corecv(s):
     return asyncio.create_task(s.arecv_msg())
 
-def asend(p, bytes):
+def cosend(p, bytes):
     return asyncio.create_task(p.asend(bytes))
 
 def dial(s, addr, *, block):

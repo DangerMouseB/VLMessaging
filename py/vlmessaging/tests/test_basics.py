@@ -49,14 +49,14 @@ def test_messaging():
         x1 = router.newConnection()
         x2 = router.newConnection(lambda m: None)
 
-        result1 = await conn.send(Msg(conn.addr, 'GET_FRED', None), 5000)
+        result1 = await conn.send(Msg(conn.addr, 'GET_FRED', None), 500)
         if result1:
             _PPMsg(f'Got', f'{result1.subject} = {result1.contents}')
         else:
             print('Timedout waiting for a result')
         x1 = x2 = None
 
-        result2 = await conn.send(Msg(conn.addr, 'ADD_ONE_TO_CURRENT', None), 5000)
+        result2 = await conn.send(Msg(conn.addr, 'ADD_ONE_TO_CURRENT', None), 500)
 
         if result2:
             _PPMsg(f'Got', f'{result2.subject} = {result2.contents}')
@@ -80,7 +80,7 @@ def test_ipc():
 
         async def msgArrived(self, msg):
             if msg.subject == 'ADD_ONE':
-                self.conn.send(msg.reply(msg.contents + 1))
+                await self.conn.send(msg.reply(msg.contents + 1))
             else:
                 raise NotImplementedError()
 
@@ -88,13 +88,10 @@ def test_ipc():
         router1 = Router(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False, name='fred')
         router2 = Router(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False, name='joe')
         fred = Fred(router1)
-
         conn2 = router2.newConnection()
-        await asyncio.sleep(1)
-
 
         print(1)
-        result1 = await conn2.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 5_000)   # give time for routers to connect
+        result1 = await conn2.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)   # give time for routers to connect
         print(2)
         result2 = await conn2.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)
 
@@ -118,7 +115,7 @@ def test_ipc():
 
 def main():
     test_ipc()
-    test_serialise()
+    # test_serialise()
     # test_messaging() - wip
     print('passed')
 
