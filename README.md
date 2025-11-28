@@ -84,3 +84,38 @@ Act as requester
 2. send msg to the address requesting addresses that can fulfill a responsibility
 3. send msgs to those addresses and either await replies upto a given timeout or process them asynchronously as they 
    arrive
+
+
+## EXAMPLES ##
+
+### Add One Via IPC Example ###
+
+```python
+from vlmessaging import Msg, Router, VLM, utils
+
+
+class AddOneAgent:
+    def __init__(self, router):
+        self.conn = router.newConnection(self.msgArrived)
+
+    async def msgArrived(self, msg):
+        if msg.subject == 'ADD_ONE':
+            await self.conn.send(msg.reply(msg.contents + 1))
+        else:
+            raise NotImplementedError()
+
+async def run_add_one_test():
+    router1 = Router(mode=VLM.MACHINE_MODE)
+    router2 = Router(mode=VLM.MACHINE_MODE)
+    fred = AddOneAgent(router1)
+    conn = router2.newConnection()
+    reply = await conn.send(Msg(fred.conn.addr, 'ADD_ONE', 41), 1_000)
+
+    assert reply.contents == 42
+
+    router1.shutdown()
+    router2.shutdown()
+    await utils.until((router1.hasShutdown, router2.hasShutdown))
+
+utils.startEventLoopWith(run_add_one_test)
+```
