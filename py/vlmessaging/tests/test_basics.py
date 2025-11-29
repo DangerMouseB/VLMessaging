@@ -8,7 +8,8 @@
 # **********************************************************************************************************************
 
 # vlmessaging imports
-from vlmessaging import Msg, Addr, Router, VLM, utils
+from vlmessaging import Msg, Addr, Router, VLM
+from vlmessaging.utils import co
 
 # local imports
 from vlmessaging._core import _msgFromBytes, _msgAsBytes
@@ -51,9 +52,9 @@ def test_local():
         assert reply.contents == 42
 
         router.shutdown()
-        await utils.until(router.hasShutdown)
+        await co.until(router.hasShutdown)
 
-    utils.startEventLoopWith(run_add_one_test)
+    co.startEventLoopWith(run_add_one_test)
 
 
 
@@ -70,9 +71,9 @@ def test_ipc():
 
         router1.shutdown()
         router2.shutdown()
-        await utils.until((router1.hasShutdown, router2.hasShutdown))
+        await co.until((router1.hasShutdown, router2.hasShutdown))
 
-    utils.startEventLoopWith(run_add_one_test)
+    co.startEventLoopWith(run_add_one_test)
 
 
 
@@ -89,13 +90,13 @@ def test_reduce_connections_to_one():
         await conn1.send(Msg(conn2.addr, 'from fred'))
         await conn2.send(Msg(conn1.addr, 'from joe'))
 
-        await utils.until(timeout=100)
+        await co.until(timeout=100)
 
         router1.shutdown()
         router2.shutdown()
-        await utils.until((router1.hasShutdown, router2.hasShutdown))
+        await co.until((router1.hasShutdown, router2.hasShutdown))
 
-    utils.startEventLoopWith(do_it)
+    co.startEventLoopWith(do_it)
 
 
 
@@ -112,9 +113,9 @@ def test_tcp():
 
         router1.shutdown()
         router2.shutdown()
-        await utils.until((router1.hasShutdown, router2.hasShutdown))
+        await co.until((router1.hasShutdown, router2.hasShutdown))
 
-    utils.startEventLoopWith(run_add_one_test)
+    co.startEventLoopWith(run_add_one_test)
 
 
 # NEXT
@@ -144,6 +145,7 @@ def main():
     test_local()
     test_ipc()
     # test_tcp()
+    test_reduce_connections_to_one()
     print('passed')
 
 

@@ -12,11 +12,8 @@
 # Python imports
 import pynng, asyncio
 
-# 3rd party imports
-from coppertop.utils import Missing
-
-# local imports
-from vlmessaging.utils import with_async_init
+# vlmessaging imports
+from vlmessaging.utils import with_async_init, Missing
 
 
 # https://github.com/nanomsg/nng

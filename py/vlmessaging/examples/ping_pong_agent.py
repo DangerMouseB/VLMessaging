@@ -10,11 +10,9 @@
 # Python imports
 import time
 
-# 3rd party imports
-from coppertop.utils import Missing
-
 # local imports
 from vlmessaging import Msg, Entry, VLM
+from vlmessaging.utils import Missing
 
 
 class PingPongAgent:

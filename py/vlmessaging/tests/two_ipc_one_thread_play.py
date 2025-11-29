@@ -21,8 +21,11 @@
 # Python imports
 import pynng, asyncio, time
 
-# coppertop imports
-from coppertop.utils import Missing
+# vlmessaging imports
+from vlmessaging.utils import Missing
+
+# local imports
+from vlmessaging._utils.pp import _PPMsg
 
 
 MACHINE_MODE = 'MACHINE_MODE'
@@ -284,9 +287,6 @@ def taskOnEvent(ev):
 def _ipcUrl(routerId):
     return f'ipc:///tmp/router_{routerId!s}'
 
-def _PPMsg(prefix, msg):
-    print(f'{prefix + ":":<17} {msg}')
-    return msg
 
 
 asyncio.run(main())

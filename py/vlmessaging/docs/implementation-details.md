@@ -32,12 +32,23 @@ In summary: uvloop is a high-performance, drop-in replacement for the default as
 but faster and implemented in Cython using libuv.
 
 
+## Timeout units - milliseconds vs seconds ##
+
+Google's AI Overviews says milliseonds are more modern. Not married to this but would need a good reason to change.
+
+
 ## LEARNING ##
 - in asyncio a "task" is a stack, a "future" is an object that is awaiting a reply
 - asyncio.create_task(...) schedules a coroutine to run in the background and returns a Task object.
 - A Task is defined by the asyncio library in Python, not by the Python language itself. It is an object that wraps
   and manages the execution of a coroutine within an event loop. Other async libraries (like Trio) have their own
   task concepts, but Task as a class is from asyncio.
+
+
+## ABSTRACTING EVENT LIB AND SOCKET LIB ##
+
+In the first cut we're using nng (via pynng) for sockets and asyncio for event loop. We have an abstraction layer so 
+potellially we can swap to another socket library (e.g. zeromq) or another event loop library (e.g. trio) in the future.
 
 
 ## IMPLEMENTATION ##

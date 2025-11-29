@@ -9,22 +9,23 @@
 
 
 # Python imports
-import itertools, logging, pynng, asyncio, weakref, collections, io, os, random, time
+import itertools, logging, pynng, asyncio, weakref, collections, io, os, random
 from amazon.ion import simpleion
 
-# coppertop imports
-from coppertop.utils import Missing, NotYetImplemented, ProgrammerError
-
 # local imports
-from vlmessaging.utils import until, monotonicTimeMs, coPopFront, pushBack, corecv, Queue, cosend, dial, send, \
-    pipeConnectionType, taskOnEvent
 from vlmessaging import _constants as VLM
+from vlmessaging._utils.sentinels import Missing
+from vlmessaging._utils.errors import NotYetImplemented, ProgrammerError
+from vlmessaging._utils.co import until, taskOnEvent
+from vlmessaging._utils.misc import firstValue
+from vlmessaging._utils.pp import _PPMsg
+from vlmessaging._utils.nng_et_al import pipeConnectionType
+from vlmessaging._utils.utils import monotonicTimeMs, coPopFront, pushBack, corecv, Queue, cosend, dial, send
 
 
 _logger = logging.getLogger(__name__)
 random.seed(int.from_bytes(os.urandom(8), 'big'))
 _routerIdSeed = itertools.count(os.getpid())
-
 
 _STOP_DIALING_ME_AND_CLOSE = "STOP_DIALING_ME_AND_CLOSE"
 
@@ -33,7 +34,6 @@ _FIRST_CONNECTION_ID = _DIRECTORY_CONNECTION_ID + 1
 _MACHINE_HUB_ROUTER_ID = 0
 _MAX_IPC_LISTEN_ATTEMPTS = 1000
 _DEFAULT_HEARTBEAT_ENTRIES_INTERVAL = 10_000
-
 
 _Details = collections.namedtuple('_Details', ('type', 'args'))
 _INBOX_RECV = 1
@@ -53,7 +53,6 @@ _eventPPNameById = {
     _TASKLIST_CHANGED: 'TASKLIST_CHANGED',
     _CONNECTION_ATTEMPT_TIMEOUT: 'CONNECTION_ATTEMPT_TIMEOUT',
 }
-
 
 _DEFAULT_LOCAL_CONNECTION_TIMESOUT = 2000
 
@@ -237,7 +236,8 @@ class Connection:
         return self._router._getDirectoryAddr()
 
     async def shutdown(self):
-        await self._router.shutdown()
+        self._router.shutdown()
+        await until(self._router.hasShutdown)
 
 
 
@@ -405,7 +405,7 @@ class Router:
 
     def _dialRouter(self, routerId, timeout):
         assert routerId not in self._accumulatedMsgsByRouterId
-        accumulatedMsgs = self._accumulatedMsgsByRouterId[routerId] = _MessagesAwaitingConnection(timeout)
+        accumulatedMsgs = self._accumulatedMsgsByRouterId[routerId] = _AccumulatedMessages(monotonicTimeMs() + timeout)
         self._dialerByRouterId[routerId] = dial(self._sMachine, _ipcUrl(routerId), block=False)
         _PPMsg('dialing_router', f'{self._name} dialing {routerId}')
         return accumulatedMsgs
@@ -509,7 +509,7 @@ class Router:
                         accumulatedMsgs = self._dialRouter(routerId, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
                     accumulatedMsgs.queueMsg(msg)
                 else:
-                    pipe = _firstValue(pipeByPipeId)
+                    pipe = firstValue(pipeByPipeId)
                     cosend(pipe, _msgAsBytes(msg))      # we might be able to await this instead but not sure we gain much
         else:
             # OPEN: handle inter-machine routing
@@ -648,21 +648,6 @@ class Router:
         return f'Router<{self._name}::{self._routerId}>'
 
 
-class _MessagesAwaitingConnection:
-    __slots__ = ('msgs', '_expiryTimeMs', '_maxQueue')
-    def __init__(self, timeout, maxQueue=Missing):
-        self.msgs = []
-        self._expiryTimeMs = monotonicTimeMs() + timeout
-        self._maxQueue = maxQueue
-
-    def queueMsg(self, msg):
-        self.msgs.append(msg)
-
-    @property
-    def hasExpired(self):
-        return self._expiryTimeMs < monotonicTimeMs() or (self._maxQueue and len(self.msgs) > self._maxQueue)
-
-
 
 # **********************************************************************************************************************
 # Directory
@@ -779,19 +764,10 @@ def _toPy(x):
     elif isinstance(x, simpleion.IonPyNull):
         return None
     elif isinstance(x, (str, int, float, bool)):
-        _PPMsg('_toPy warning', f'primitive type "{type(x)}" passed through unchanged.')
+        _PPMsg('_toPy', f'WARNING: primitive type "{type(x)}" passed through unchanged.')
         return x
     else:
         raise ProgrammerError(f'Unknown ION type "{type(x)}".')
-
-
-# **********************************************************************************************************************
-# Logging and pretty-printing
-# **********************************************************************************************************************
-
-def _PPMsg(prefix, msg):
-    print(f'    {prefix + ":":<18} {msg}')
-    return msg
 
 
 # **********************************************************************************************************************
@@ -807,11 +783,19 @@ def _tcpAddr(ip, port):
     else:
         return f'tcp://{ip}:{port}'
 
-def _localPipeAddr(pipe):
-    # in ipc local_address and remote_address are the same string - so display pipe id to distinguish remote peers
-    return f'<{pipe.remote_address!s}::{pipe.id}>'
 
-def _firstValue(d):
-    # https://stackoverflow.com/questions/30362391/how-do-you-find-the-first-key-in-a-dictionary
-    for k, v in d.items():
-        return v
+class _AccumulatedMessages:
+    __slots__ = ('msgs', '_expiryTimeMs', '_maxQueue')
+
+    def __init__(self, timeout, maxQueue=Missing):
+        self.msgs = []
+        self._expiryTimeMs = monotonicTimeMs() + timeout
+        self._maxQueue = maxQueue
+
+    def queueMsg(self, msg):
+        self.msgs.append(msg)
+
+    @property
+    def hasExpired(self):
+        return self._expiryTimeMs < monotonicTimeMs() or (self._maxQueue and len(self.msgs) > self._maxQueue)
+

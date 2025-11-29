@@ -12,11 +12,9 @@
 # Python imports
 import multiprocessing, time, queue
 
-# 3rd party imports
-from coppertop.utils import Missing
-
-# local imports
+# vlmessaging imports
 from vlmessaging import VLM
+from vlmessaging.utils import Missing
 
 
 SHUTDOWN = 'SHUTDOWN'

@@ -7,11 +7,10 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
-
-# 3rd party imports
-from coppertop.utils import Missing
+# Directory utilities
 
 # local imports
+from vlmessaging._utils.sentinels import Missing
 from vlmessaging import _constants as VLM
 from vlmessaging._core import ExitMessageHandler, Msg
 
@@ -36,4 +35,3 @@ async def _findSingleEntryAddrOfTypeOrExit(connection, entryType, timeout, errMs
             return entry.addr
     if errMsg: await connection.send(errMsg)
     raise ExitMessageHandler()
-

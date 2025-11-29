@@ -18,14 +18,14 @@
 # Python imports
 import asyncio, multiprocessing, os, inspect, itertools
 
-# 3rd party imports
-from coppertop.utils import Missing
+# vlmessaging imports
+from vlmessaging import Msg, Router, Entry, VLM, ExitMessageHandler
+from vlmessaging.utils import Missing, co, wip
 
 # local imports
-from vlmessaging import Msg, Router, Entry, VLM, ExitMessageHandler
-from vlmessaging.utils import with_async_init, Timer, until, CountFailures
-from vlmessaging._utils import _findSingleEntryAddrOfTypeOrExit
-from vlmessaging._core import _PPMsg
+from vlmessaging._utils.pp import _PPMsg
+from vlmessaging._utils.testing import CountFailures
+from vlmessaging._utils.utils import Timer
 
 
 
@@ -36,7 +36,7 @@ from vlmessaging._core import _PPMsg
 # that the AddOneToCurrentAgent can cope with failure and rediscover another GetCurrentAgent.
 # **********************************************************************************************************************
 
-@with_async_init
+@co.with_async_init
 class GetCurrentAgent:
 
     __slots__ = ('conn', 'delay', 'running')
@@ -80,7 +80,7 @@ class GetCurrentAgent:
 # agent failure.
 # **********************************************************************************************************************
 
-@with_async_init
+@co.with_async_init
 class AddOneToCurrentAgent:
 
     __slots__ = ('conn', 'addrOfGetCurrentAgent')
@@ -105,7 +105,7 @@ class AddOneToCurrentAgent:
             current = Missing
             while not current:
                 if self.addrOfGetCurrentAgent is Missing:
-                    self.addrOfGetCurrentAgent = await _findSingleEntryAddrOfTypeOrExit(self.conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg)
+                    self.addrOfGetCurrentAgent = await wip._findSingleEntryAddrOfTypeOrExit(self.conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg)
                 current = await self.conn.send(Msg(self.addrOfGetCurrentAgent, GetCurrentAgent.GET_CURRENT, Missing), 200)
             reply = msg.reply(current.contents + 1)
             await self.conn.send(reply)
@@ -135,7 +135,7 @@ async def _test_add_one_to_current(router):
     t = Timer(5000)
     while not addOneAgentAddr and not t:
         try:
-            addOneAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, AddOneToCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
+            addOneAgentAddr = await wip._findSingleEntryAddrOfTypeOrExit(conn, AddOneToCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
         except ExitMessageHandler:
             pass
         await asyncio.sleep(0.5)
@@ -148,7 +148,7 @@ async def _test_add_one_to_current(router):
     # kill off the GetCurrentAgent to test that the AddOneToCurrentAgent copes
     getCurrentAgentAddr = Missing
     while not getCurrentAgentAddr:
-        getCurrentAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
+        getCurrentAgentAddr = await wip._findSingleEntryAddrOfTypeOrExit(conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
     res = await conn.send(Msg(getCurrentAgentAddr, GetCurrentAgent.KILL, None), 500)
     assert res and res.isReply
     await asyncio.sleep(0.01)
@@ -165,7 +165,7 @@ async def _test_add_one_to_current(router):
     assert res.contents == 42
 
     # shutdown the GetCurrentAgent's router
-    getCurrentAgentAddr = await _findSingleEntryAddrOfTypeOrExit(conn, GetCurrentAgent.ENTRY_TYPE, 5000, errMsg=Missing)
+    getCurrentAgentAddr = await wip._findSingleEntryAddrOfTypeOrExit(conn, GetCurrentAgent.ENTRY_TYPE, 5000, errMsg=Missing)
     if getCurrentAgentAddr is not Missing:
         msg = Msg(getCurrentAgentAddr, VLM.SHUTDOWN, None)
         res = await conn.send(msg, 5000)
@@ -177,7 +177,8 @@ async def _test_add_one_to_current(router):
     assert res is Missing
 
     # shutdown this test's router
-    await router.shutdown()
+    router.shutdown()
+    await co.until(router.hasShutdown)
 
 
 
@@ -200,7 +201,7 @@ def _startAgents(outBox, routerKwargs, seqOfFnAndArgs):
     async def _():
         try:
             router = await _startRouterWithAgents(routerKwargs, seqOfFnAndArgs)
-            await until(router.hasShutdown)
+            await co.until(router.hasShutdown)
             outBox.put((os.getpid(), True))
         except AssertionError as e:
             outBox.put((os.getpid(), False))
@@ -228,7 +229,7 @@ def _start_services_3_routers_1_loop():
                 (_test_add_one_to_current, ()),
             ]
         )
-        await until(router1.hasShutdown and router2.hasShutdown and router3.hasShutdown, timeout=10000)
+        await co.until(router1.hasShutdown and router2.hasShutdown and router3.hasShutdown, timeout=10000)
     asyncio.run(_())
 
 

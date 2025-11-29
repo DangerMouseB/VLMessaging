@@ -13,7 +13,7 @@
 import argparse, pynng, asyncio, os
 
 # VLMessaging imports
-from vlmessaging.utils import until
+from vlmessaging.utils.co import until
 
 
 class Router:
