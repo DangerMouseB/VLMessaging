@@ -76,6 +76,29 @@ def test_ipc():
 
 
 
+def test_reduce_connections_to_one():
+
+    async def msgArrived(msg):
+        print(msg)
+
+    async def do_it():
+        router1 = Router(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False, name='fred')
+        router2 = Router(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False, name='joe')
+        conn1 = router1.newConnection(fn=msgArrived)
+        conn2 = router2.newConnection(fn=msgArrived)
+        await conn1.send(Msg(conn2.addr, 'from fred'))
+        await conn2.send(Msg(conn1.addr, 'from joe'))
+
+        await utils.until(timeout=100)
+
+        router1.shutdown()
+        router2.shutdown()
+        await utils.until((router1.hasShutdown, router2.hasShutdown))
+
+    utils.startEventLoopWith(do_it)
+
+
+
 def test_tcp():
 
     async def run_add_one_test():
