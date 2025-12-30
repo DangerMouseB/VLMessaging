@@ -8,14 +8,7 @@
 # **********************************************************************************************************************
 
 # goal:
-# 1) to establish the identity of the remote peer connected to a pipe
-# 2) cancel an incoming connection event that not on the same ipc channel as the one I am already awaiting on (with
-#    my queued msgs) to complete - this should help us only have one pipe per remote peer, but needs use to tell the
-#    remote dialer to stop dialing as we are on the case
-# 2b) or could await a random period and drop any duplicate connections, eventually after a false start or two we
-#    should get into a steady state
-
-# OPEN: implement STOP_DIALING_ME_AND_CLOSE message
+# 1) to understand nng tcp sockets more thoroughly in particular connection events
 
 
 # Python imports
@@ -26,6 +19,7 @@ from vlmessaging.utils import Missing
 
 # local imports
 from vlmessaging._utils.pp import _PPMsg
+from vlmessaging._core import Msg, Addr, _msgAsBytes, _msgFromBytes, _ROUTER_REP, _MsgAccumulator
 
 
 MACHINE_MODE = 'MACHINE_MODE'
@@ -33,44 +27,35 @@ _STOP_DIALING_ME_AND_CLOSE = "STOP_DIALING_ME_AND_CLOSE"
 _DEFAULT_LOCAL_CONNECTION_TIMESOUT = 2000
 
 
-class _MesagesAwaitingConnection:
-    __slots__ = ('msgs', '_expiryTimeMs')
-    def __init__(self, timeout, maxQueue=Missing):
-        self.msgs = []
-        self._expiryTimeMs = monotonicTimeMs() + timeout
-    def queueMsg(self, msg):
-        self.msgs.append(msg)
-    @property
-    def hasExpired(self):
-        return self._expiryTimeMs < monotonicTimeMs()
-
-
 class FireSock:
-
     __slots__ = (
-        '_mEp', '_sMachine', '_pipeByRouterId', '_mEpByPipeId', '_dialerByRouterId', '_accumulatedMsgsByRouterId',
+        '_name', '_ep', '_sock', '_pipeByNEp', '_nEpByPipeId', '_dialerByNEp', '_accumulatedMsgsByNEp',
         '_taskListChanged', '_isShuttingDownTask', '_isShuttingDown', '_hasShutdown'
     )
 
-
     # PUBLIC API
 
-    def __init__(self, mEp):
-        self._mEp = Missing
-        self._sMachine = Missing
-        self._pipeByRouterId = {}
-        self._mEpByPipeId = {}
-        self._dialerByRouterId = {}
-        self._accumulatedMsgsByRouterId = {}
+    def __init__(self, name, nEp=Missing):
+        self._name = name
+        self._ep = nEp
+        self._sock = Missing
+        self._pipeByNEp = {}
+        self._nEpByPipeId = {}
+        self._dialerByNEp = {}
+        self._accumulatedMsgsByNEp = {}
 
         self._taskListChanged = asyncio.Event()
         self._isShuttingDown = asyncio.Event()
         self._hasShutdown = asyncio.Event()
         self._isShuttingDownTask = asyncio.create_task(self._isShuttingDown.wait())
 
-        self._listenForRouters(mEp)
-        asyncio.create_task(self._mainLoop())
+        self._sock = pynng.Pair1(polyamorous=True)
+        self._sock.add_post_pipe_connect_cb(self._onConnect)
+        self._sock.add_post_pipe_remove_cb(self._onDisconnect)
 
+        if nEp is not Missing:
+            self.nEpListen(nEp)
+        asyncio.create_task(self._mainLoop())
 
     async def shutdown(self):
         self._isShuttingDown.set()
@@ -84,43 +69,60 @@ class FireSock:
 
     # MACHINE CONNECTION MANAGEMENT
 
-    def _listenForRouters(self, mEp):
-        self._mEp = mEp
-        self._sMachine = pynng.Pair1(polyamorous=True)
-        self._sMachine.add_post_pipe_connect_cb(self._onRouterConnect)
-        self._sMachine.add_post_pipe_remove_cb(self._onRouterDisconnect)
-        self._sMachine.listen(_ipcUrl(mEp))
+    def nEpListen(self, nEp):
+        self._ep = nEp
+        self._sock.listen(nEp)
         self._taskListChanged.set()
 
-    def _dialRouter(self, mEp, timeout):
-        assert mEp not in self._accumulatedMsgsByRouterId
-        accumulatedMsgs = self._accumulatedMsgsByRouterId[mEp] = _MesagesAwaitingConnection(timeout)
-        self._dialerByRouterId[mEp] = dial(self._sMachine, _ipcUrl(mEp), block=False)
-        _PPMsg('DialingRouter', f'{self._mEp} dialing {mEp}')
+    def _dialRouter(self, nEp, timeout):
+        assert nEp not in self._accumulatedMsgsByNEp
+        accumulatedMsgs = self._accumulatedMsgsByNEp[nEp] = _MsgAccumulator(timeout)
+        self._dialerByNEp[nEp] = dial(self._sock, nEp, block=False)
+        _PPMsg('DialingRouter', f'{self._name} dialing {nEp}')
         return accumulatedMsgs
+
 
     # MACHINE SOCKET CALLBACKS
 
-    def _onRouterConnect(self, pipe):
-        connection_type = pipeConnectionType(pipe)
-        _PPMsg('RouterConnect', f'{self._mEp}: connection {connection_type} on channel {pipe.url}')
-        send(pipe, self._mEp.encode(), block=False)
+    def _onConnect(self, pipe):
+        if pipe.url.startswith('tcp://'):
+            if f'tcp://{pipe.local_address}' == self._ep:
+                self._onIncomingTcpConnect(pipe)
+            else:
+                self._onOutGoingTcpConnect(pipe)
+        else:
+            _PPMsg('connect', f'{self._name} - NotYetImplemented connection on channel {pipe.url}')
 
-    def _onRouterDisconnect(self, pipe):
-        mEp = self._mEpByPipeId.pop(pipe.id, 'unknown')
-        _PPMsg('RouterDisconnect', f'{self._mEp} disconnected from {mEp} on channel {pipe.url}')
-        self._pipeByRouterId.pop(mEp, None)
-        
+    def _onIncomingTcpConnect(self, pipe):
+        localNEpRandomPort = f'tcp://{pipe.local_address}'
+        ep = f'tcp://{pipe.remote_address}'
+        _PPMsg('connectTcpIn', f'{self._name} - accepted connection from {ep}')
+
+    def _onOutGoingTcpConnect(self, pipe):
+        localNEpRandomPort = f'tcp://{pipe.local_address}'
+        ep = f'tcp://{pipe.remote_address}'
+        _PPMsg('connectTcpOut', f'{self._name} - connected to {ep} from {localNEpRandomPort}')
+        self._pipeByNEp[ep] = pipe
+        # tell the other end who we are
+        msg = Msg(Addr(ep, None, _ROUTER_REP), "SET_ROUTE_FOR_NEP", (self._name, localNEpRandomPort))
+        msg.replyAddr = Addr(self._name, None, _ROUTER_REP)
+        send(pipe, _msgAsBytes(msg), block=False)
+
+    def _onDisconnect(self, pipe):
+        nEp = self._nEpByPipeId.pop(pipe.id, 'unknown')
+        _PPMsg('disconnect', f'{self._name} - disconnected from {nEp} on channel {pipe.url}')
+        self._pipeByNEp.pop(nEp, None)
+
 
     # ROUTING
 
-    def send(self, msg, mEp):
-        if (pipe := self._pipeByRouterId.get(routerId, Missing)) is Missing:
-            if (accumulatedMsgs := self._accumulatedMsgsByRouterId.get(routerId, Missing)) is Missing:
-                accumulatedMsgs = self._dialRouter(routerId, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
+    def send(self, msg, nEp):
+        if (pipe := self._pipeByNEp.get(nEp, Missing)) is Missing:
+            if (accumulatedMsgs := self._accumulatedMsgsByNEp.get(nEp, Missing)) is Missing:
+                accumulatedMsgs = self._dialRouter(nEp, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
             accumulatedMsgs.queueMsg(msg)
         else:
-            print(f'{self._routerId} - sending "{msg}" to {routerId}')
+            print(f'{self._name} - sending "{msg}" to {nEp}')
             cosend(pipe, msg.encode())
 
 
@@ -140,42 +142,44 @@ class FireSock:
             except Exception as ex:
                 raise
             for task in done:
-                details = taskList.pop(task)                                           # take task from list
+                details = taskList.pop(task)  # take task from list
 
                 if details == 'ipc':
-                    msg = task.result()
-                    pipe = msg.pipe
-                    if pipe.id not in self._routerIdByPipeId:
-                        # first message on this pipe is the routerId of the remote peer
-                        routerId = msg.bytes.decode()
-                        if routerId in self._pipeByRouterId:
-                            print(f'{self._routerId} - WARNING: already connected to {routerId} - overwriting previous connection')
-                            self._routerIdByPipeId[pipe.id] = routerId
-                            self._pipeByRouterId[routerId] = pipe
+                    nngMsg = task.result()
+                    pipe = nngMsg.pipe
+                    msg = _msgFromBytes(nngMsg.bytes)
+                    if pipe.id not in self._nEpByPipeId:
+                        # first message on this pipe is the nEp of the remote peer
+                        assert msg.subject == "SET_ROUTE_FOR_NEP"
+                        nEp = msg.contents[0]
+                        if nEp in self._pipeByNEp:
+                            print(f'{self._name} - WARNING: already connected to {nEp} - overwriting previous connection')
+                            self._nEpByPipeId[pipe.id] = nEp
+                            self._pipeByNEp[nEp] = pipe
                         else:
-                            self._routerIdByPipeId[pipe.id] = routerId
-                            self._pipeByRouterId[routerId] = pipe
-                            print(f'{self._routerId} receiving connection from {routerId}')
+                            self._nEpByPipeId[pipe.id] = nEp
+                            self._pipeByNEp[nEp] = pipe
+                            print(f'{self._name} receiving connection from {nEp}')
                         # send any queued messages
-                        if (queuedMsgs := self._accumulatedMsgsByRouterId.pop(routerId, Missing)) is not Missing:
+                        if (queuedMsgs := self._accumulatedMsgsByNEp.pop(nEp, Missing)) is not Missing:
                             for queuedMsg in queuedMsgs.msgs:
-                                print(f'{self._routerId} - sending queued "{queuedMsg}" to {routerId}')
+                                print(f'{self._name} - sending queued "{queuedMsg}" to {nEp}')
                                 cosend(pipe, queuedMsg.encode())
                     else:
-                        ppMsg = f'{self._routerId} received: "{msg.bytes.decode()}" from: {self._routerIdByPipeId[pipe.id]}'
+                        ppMsg = f'{self._name} received: "{msg.bytes.decode()}" from: {self._nEpByPipeId[pipe.id]}'
                         _msgLog.append(ppMsg)
                         print(ppMsg)
-                    taskList[corecv(self._sMachine)] = details                         # add task to bottom of list
+                    taskList[corecv(self._sock)] = details  # add task to bottom of list
 
                 elif details == 'tasklist':
-                    if self._sMachine and 'ipc' not in taskList.values():
-                        taskList[corecv(self._sMachine)] = 'ipc'
-                        _PPMsg(f'TaskList', f'adding ipc on {self._routerId}')
+                    if self._sock and 'ipc' not in taskList.values():
+                        taskList[corecv(self._sock)] = 'ipc'
+                        _PPMsg(f'TaskList', f'adding ipc on {self._name}')
                     self._taskListChanged.clear()
                     taskList[task] = details
 
                 elif details == 'shutdown':
-                    _PPMsg(f'ShuttingDown', f'{self._routerId}')
+                    _PPMsg(f'ShuttingDown', f'{self._name}')
                     running = False
                     break
 
@@ -188,46 +192,27 @@ class FireSock:
         for t in taskList.keys():
             t.cancel()
             await until(timeout=0)
-        _PPMsg(f'ShutDown', f'{self._routerId}')
-
+        _PPMsg(f'ShutDown', f'{self._name}')
 
 
 _msgLog = []
 
 
 async def main():
-
-    fred = FireSock('fred')
+    fred = FireSock('fred', 'tcp://127.0.0.1:30001')
     joe = FireSock('joe')
 
     print(1)
-    fred.send('hi', 'joe')
-    # await asyncio.sleep(0.2)        # comment this out to see connection racing
+    joe.send('hello', 'tcp://127.0.0.1:30001')
 
     print(2)
-    joe.send('hello', 'fred')
-    print(3)
-    fred.send('hi 2', 'joe')
-    print(4)
-    joe.send('hello 2', 'fred')
-
-    print(4)
-    await asyncio.sleep(0.2)
-
-    print(3)
-    fred.send('hi 3', 'joe')
-    print(4)
-    joe.send('hello 3', 'fred')
-
-    print(4)
     await asyncio.sleep(2)
 
-    print(5)
+    print(3)
     await fred.shutdown()
     await joe.shutdown()
 
     await until([fred.hasShutdown, joe.hasShutdown])
-
 
     print('done')
 
@@ -235,8 +220,10 @@ async def main():
 def corecv(s):
     return asyncio.create_task(s.arecv_msg())
 
+
 def dial(s, addr, *, block):
     return s.dial(addr, block=block)
+
 
 def pipeConnectionType(pipe):
     try:
@@ -246,12 +233,15 @@ def pipeConnectionType(pipe):
         pipe.dialer
         return 'outgoing'
 
+
 def send(p, bytes, *, block):
     assert not isinstance(bytes, str)
     p.socket.send_msg(pynng.Message(bytes, p), block)
 
+
 def cosend(p, bytes):
     return asyncio.create_task(p.asend(bytes))
+
 
 def monotonicTimeMs():
     # we can be in control of time for testing etc
@@ -260,8 +250,10 @@ def monotonicTimeMs():
     except RuntimeError:
         return time.monotonic() * 1000
 
+
 tDictKeys = type({}.keys())
 tDictValues = type({}.values())
+
 
 async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
     """Wraps any Event in awaitables in a Task then returns await asyncio.wait(...)."""
@@ -276,16 +268,14 @@ async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
     if awaitables:
         return await asyncio.wait(things, timeout=secs, return_when=return_when)
     elif timeout is not None:
-        await asyncio.sleep(timeout / 1000.0)     # even if timeout == 0 yield at least once
+        await asyncio.sleep(timeout / 1000.0)  # even if timeout == 0 yield at least once
         return [], []
     else:
         return [], []
 
+
 def taskOnEvent(ev):
     return asyncio.create_task(ev.wait())
-
-def _ipcUrl(routerId):
-    return f'ipc:///tmp/router_{routerId!s}'
 
 
 

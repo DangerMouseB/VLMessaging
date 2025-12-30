@@ -19,7 +19,7 @@
 import asyncio, multiprocessing, os, inspect, itertools
 
 # vlmessaging imports
-from vlmessaging import Msg, Router, Entry, VLM, ExitMessageHandler
+from vlmessaging import Msg, Router, Entry, VLM, Directory
 from vlmessaging.utils import Missing, co, wip
 
 # local imports
@@ -51,7 +51,7 @@ class GetCurrentAgent:
         entryAdded = False
         self.running = True
         while not entryAdded:
-            msg = Msg(self.conn.getDirectoryAddr(), VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
+            msg = Msg(self.conn.directoryAddr, VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
             entryAdded = await self.conn.send(msg, 1000)
             if entryAdded: entryAdded = entryAdded.contents
 
@@ -93,7 +93,7 @@ class AddOneToCurrentAgent:
         self.addrOfGetCurrentAgent = Missing
         entryAdded = False
         while not entryAdded:
-            msg = Msg(self.conn.getDirectoryAddr(), VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
+            msg = Msg(self.conn.directoryAddr, VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
             entryAdded = await self.conn.send(msg, 1000)
             if entryAdded: entryAdded = entryAdded.contents
 
@@ -101,18 +101,27 @@ class AddOneToCurrentAgent:
     async def msgArrived(self, msg):
 
         if msg.subject == self.ADD_ONE_TO_CURRENT:
-            errMsg = msg.reply(RuntimeError(f'Can\'t find a {GetCurrentAgent.ENTRY_TYPE}'))
             current = Missing
-            while not current:
+            t = Timer(3000)
+            while not current and not t:
+                # addrOfGetCurrentAgent maybe cleared in MSG_NOT_DELIVERED
                 if self.addrOfGetCurrentAgent is Missing:
-                    self.addrOfGetCurrentAgent = await wip._findSingleEntryAddrOfTypeOrExit(self.conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg)
-                current = await self.conn.send(Msg(self.addrOfGetCurrentAgent, GetCurrentAgent.GET_CURRENT, Missing), 200)
+                    # OPEN: may need to _waitForSingleEntryAddrOfTypeOrReplyAndExit
+                    self.addrOfGetCurrentAgent = await wip._findSingleEntryAddrOfTypeOrReplyAndExit(
+                        self.conn,
+                        GetCurrentAgent.ENTRY_TYPE,
+                        200,
+                        msg.reply(RuntimeError(f'Can\'t find a {GetCurrentAgent.ENTRY_TYPE}'))
+                    )
+                else:
+                    current = await self.conn.send(Msg(self.addrOfGetCurrentAgent, GetCurrentAgent.GET_CURRENT, Missing), 200)
+            if current is Missing: await wip._replyAndExit(self.conn, msg.reply(RuntimeError(f'Can\'t GET_CURRENT')))
             reply = msg.reply(current.contents + 1)
             await self.conn.send(reply)
 
         elif msg.subject == VLM.MSG_NOT_DELIVERED:
             if msg.contents == self.addrOfGetCurrentAgent:
-                await self.conn.send(Msg(self.conn.getDirectoryAddr(), VLM.UNREGISTER_ADDR, self.addrOfGetCurrentAgent))
+                await self.conn.send(Msg(self.conn.directoryAddr, VLM.UNREGISTER_ADDR, self.addrOfGetCurrentAgent))
                 self.addrOfGetCurrentAgent = Missing   # force a rediscovery next time
 
         else:
@@ -121,12 +130,12 @@ class AddOneToCurrentAgent:
 
 
 # **********************************************************************************************************************
-# The _test_add_one_to_current script - finds an AddOneToCurrentAgent, requests ADD_ONE_TO_CURRENT, kills off the
+# The test_add_one_to_current script - finds an AddOneToCurrentAgent, requests ADD_ONE_TO_CURRENT, kills off the
 # GetCurrentAgent, starts a new GetCurrentAgent and asks the AddOneToCurrentAgent to again ADD_ONE_TO_CURRENT to show
 # coping with agent failure. Shuts down all agents and its router at the end of the test.
 # **********************************************************************************************************************
 
-async def _test_add_one_to_current(router):
+async def test_add_one_to_current(router):
     conn = router.newConnection()
 
     # check that AddOneToCurrentAgent can find GetCurrentAgent and get a reply eventually
@@ -134,11 +143,7 @@ async def _test_add_one_to_current(router):
     # OPEN: we need to start heartbeat loops of directories so hub and non-hub directories can sync
     t = Timer(5000)
     while not addOneAgentAddr and not t:
-        try:
-            addOneAgentAddr = await wip._findSingleEntryAddrOfTypeOrExit(conn, AddOneToCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
-        except ExitMessageHandler:
-            pass
-        await asyncio.sleep(0.5)
+        addOneAgentAddr = await wip._findSingleEntryAddrOfTypeOrMissing(conn, AddOneToCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
     if addOneAgentAddr is Missing:
         raise RuntimeError(f'Could not find an {AddOneToCurrentAgent.ENTRY_TYPE} entry')
     msg = Msg(addOneAgentAddr, AddOneToCurrentAgent.ADD_ONE_TO_CURRENT, None)
@@ -148,7 +153,7 @@ async def _test_add_one_to_current(router):
     # kill off the GetCurrentAgent to test that the AddOneToCurrentAgent copes
     getCurrentAgentAddr = Missing
     while not getCurrentAgentAddr:
-        getCurrentAgentAddr = await wip._findSingleEntryAddrOfTypeOrExit(conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
+        getCurrentAgentAddr = await wip._findSingleEntryAddrOfTypeOrMissing(conn, GetCurrentAgent.ENTRY_TYPE, 1000, errMsg=Missing)
     res = await conn.send(Msg(getCurrentAgentAddr, GetCurrentAgent.KILL, None), 500)
     assert res and res.isReply
     await asyncio.sleep(0.01)
@@ -165,7 +170,7 @@ async def _test_add_one_to_current(router):
     assert res.contents == 42
 
     # shutdown the GetCurrentAgent's router
-    getCurrentAgentAddr = await wip._findSingleEntryAddrOfTypeOrExit(conn, GetCurrentAgent.ENTRY_TYPE, 5000, errMsg=Missing)
+    getCurrentAgentAddr = await wip._findSingleEntryAddrOfTypeOrMissing(conn, GetCurrentAgent.ENTRY_TYPE, 5000, errMsg=Missing)
     if getCurrentAgentAddr is not Missing:
         msg = Msg(getCurrentAgentAddr, VLM.SHUTDOWN, None)
         res = await conn.send(msg, 5000)
@@ -188,6 +193,7 @@ async def _test_add_one_to_current(router):
 
 async def _startRouterWithAgents(routerKwargs, seqOfFnAndArgs):
     router = Router(**routerKwargs)
+    d = Directory(router)
     agents = []
     for fn, args in seqOfFnAndArgs:
         agent = fn(router, *args)
@@ -226,11 +232,21 @@ def _start_services_3_routers_1_loop():
         router3 = await _startRouterWithAgents(
             dict(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False),
             [
-                (_test_add_one_to_current, ()),
+                (test_add_one_to_current, ()),
             ]
         )
         await co.until(router1.hasShutdown and router2.hasShutdown and router3.hasShutdown, timeout=10000)
     asyncio.run(_())
+
+
+# **********************************************************************************************************************
+# tests
+# **********************************************************************************************************************
+
+listenOn = {
+    'type': 'tcp', 'host': 'localhost', 'port': 30000,
+}
+
 
 
 
@@ -246,7 +262,7 @@ def test_add_one_to_current_1_process():
         [
             (AddOneToCurrentAgent, ()),
             (GetCurrentAgent, (500,)),
-            (_test_add_one_to_current, ()),
+            (test_add_one_to_current, ()),
         ]
     ))
     p.start()
@@ -276,7 +292,7 @@ def test_add_one_to_current_3_processes():
         outBox,
         dict(mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=False),
         [
-            (_test_add_one_to_current, ()),
+            (test_add_one_to_current, ()),
         ]
     ))
     p1.start()

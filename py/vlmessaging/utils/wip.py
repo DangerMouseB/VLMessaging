@@ -7,6 +7,10 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
-from vlmessaging._utils.directory import _findEntriesOfTypeOrExit, _findSingleEntryAddrOfTypeOrExit
+from vlmessaging._utils.directory import _findEntriesOfTypeOrExit, _findSingleEntryAddrOfTypeOrReplyAndExit, \
+    _replyAndExit, _findSingleEntryAddrOfTypeOrMissing, _waitForSingleEntryAddrOfTypeOrReplyAndExit
 
-__all__ = ['_findEntriesOfTypeOrExit', '_findSingleEntryAddrOfTypeOrExit']
+__all__ = [
+    '_findEntriesOfTypeOrExit', '_findSingleEntryAddrOfTypeOrReplyAndExit', '_replyAndExit',
+    '_findSingleEntryAddrOfTypeOrMissing', '_waitForSingleEntryAddrOfTypeOrReplyAndExit',
+]

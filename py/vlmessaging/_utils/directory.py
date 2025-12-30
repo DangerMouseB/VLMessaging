@@ -9,29 +9,39 @@
 
 # Directory utilities
 
+# Python imports
+import asyncio
+
 # local imports
 from vlmessaging._utils.sentinels import Missing
+from vlmessaging._utils.utils import Timer
 from vlmessaging import _constants as VLM
 from vlmessaging._core import ExitMessageHandler, Msg
 
 
 # work-in-progress utils
 
-async def _findEntriesOfTypeOrExit(connection, entryType, timeout, errMsg):
-    res = await connection.send(Msg(connection.getDirectoryAddr(), VLM.GET_ENTRIES, entryType), timeout)
-    if res is Missing:
-        if errMsg: await connection.send(errMsg)
-        raise ExitMessageHandler()
-    else:
-        return res.contents
+async def _waitForSingleEntryAddrOfTypeOrReplyAndExit(connection, entryType, totalTimeout, msgTimeout, errMsg):
+    t = Timer(totalTimeout)
+    while not t:
+        if entry := await _findSingleEntryAddrOfTypeOrMissing(connection, entryType, msgTimeout, errMsg): return entry
+        await asyncio.sleep(msgTimeout)
+    await _replyAndExit(connection, errMsg)
 
-async def _findSingleEntryAddrOfTypeOrExit(connection, entryType, timeout, errMsg):
-    res = await connection.send(Msg(connection.getDirectoryAddr(), VLM.GET_ENTRIES, entryType), timeout)
-    if res is Missing:
-        if errMsg: await connection.send(errMsg)
-        raise ExitMessageHandler()
-    for entry in res.contents:
-        if entry.service == entryType:
-            return entry.addr
+async def _findSingleEntryAddrOfTypeOrReplyAndExit(connection, entryType, timeout, errMsg):
+    if entry := await _findSingleEntryAddrOfTypeOrMissing(connection, entryType, timeout, errMsg): return entry
+    await _replyAndExit(connection, errMsg)
+
+async def _findSingleEntryAddrOfTypeOrMissing(connection, entryType, timeout, errMsg):
+    for entry in await _findEntriesOfTypeOrExit(connection, entryType, timeout, errMsg):
+        if entry.service == entryType: return entry.addr
+    return Missing
+
+async def _findEntriesOfTypeOrExit(connection, entryType, timeout, errMsg):
+    res = await connection.send(Msg(connection.directoryAddr, VLM.GET_ENTRIES, entryType), timeout)
+    if res is Missing: await _replyAndExit(connection, errMsg)
+    return res.contents
+
+async def _replyAndExit(connection, errMsg):
     if errMsg: await connection.send(errMsg)
     raise ExitMessageHandler()

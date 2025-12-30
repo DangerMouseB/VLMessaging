@@ -32,7 +32,7 @@ class PingPongAgent:
     async def register(self):
         entryAdded = False
         while not entryAdded:
-            msg = Msg(self.conn.getDirectoryAddr(), VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
+            msg = Msg(self.conn.directoryAddr, VLM.REGISTER_ENTRY, Entry(self.conn.addr, self.ENTRY_TYPE, None, None, None))
             entryAdded = await self.conn.send(msg, 1000)
             if entryAdded: entryAdded = entryAdded.contents
 
@@ -40,14 +40,14 @@ class PingPongAgent:
 
         if msg.subject == self.DO_IT:
             contents = {'msg': msg, 'N': msg.contents, 'i': 0, 't1': time.perf_counter_ns()}
-            m = Msg(self.conn.getDirectoryAddr(), VLM.GET_ENTRIES, self.ENTRY_TYPE)
+            m = Msg(self.conn.directoryAddr, VLM.GET_ENTRIES, self.ENTRY_TYPE)
             res = await self.conn.send(m, 1000)
             for e in res.contents:
                 if e.addr != self.conn.addr:
                     toAddr = e.addr
                     break
             await self.conn.send(Msg(toAddr, self.PING, contents))
-            await self.conn.send(Msg(msg.fromAddr, self.DO_IT_PROGRESS, "Started"))
+            await self.conn.send(Msg(msg.replyAddr, self.DO_IT_PROGRESS, "Started"))
 
         elif msg.subject in (self.PING, self.PONG):
             contents = msg.contents
@@ -65,7 +65,7 @@ class PingPongAgent:
 
         elif msg.subject == VLM.MSG_NOT_DELIVERED:
             if msg.contents == self.getCurrentAddr:
-                await self.conn.send(Msg(self.conn.getDirectoryAddr(), VLM.UNREGISTER_ADDR, self.getCurrentAddr))
+                await self.conn.send(Msg(self.conn.directoryAddr, VLM.UNREGISTER_ADDR, self.getCurrentAddr))
                 self.getCurrentAddr = Missing   # force a rediscovery next time
 
         else:

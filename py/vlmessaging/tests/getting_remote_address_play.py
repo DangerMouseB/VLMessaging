@@ -18,20 +18,20 @@ from vlmessaging.utils.co import until
 
 class Router:
 
-    __slots__ = ('_sock', 'addr', 'routerId', '_pipeByPipeId', '_pipeIdByRouterId', '_routerIdByPipeId', 'running')
+    __slots__ = ('_sock', 'addr', 'mEp', '_pipeByPipeId', '_pipeIdByRouterId', '_mEpByPipeId', 'running')
 
     def __init__(self, listen_addr, *connect_addrs):
-        self.routerId = os.getpid()
+        self.mEp = os.getpid()
         self._pipeByPipeId = {}
         self._pipeIdByRouterId = {}
-        self._routerIdByPipeId = {}
+        self._mEpByPipeId = {}
 
         self._sock = pynng.Pair1(polyamorous=True)
         self._sock.add_post_pipe_connect_cb(self.post_connect_cb)
         self._sock.add_post_pipe_remove_cb(self.post_remove_cb)
         listener = self._sock.listen(listen_addr)
         extra = f' and connecting to {", ".join(connect_addrs)}' if connect_addrs else ''
-        print(f'\n\n<{self.routerId}> listening on {str(listener.local_address)}{extra}')
+        print(f'\n\n<{self.mEp}> listening on {str(listener.local_address)}{extra}')
         for addr in connect_addrs:
             dialer = self._sock.dial(addr)
         self.running = True
@@ -41,18 +41,18 @@ class Router:
     def post_connect_cb(self, pipe):
         try:
             # send my router id to the remote peer as the first message on this pipe
-            pipe.socket.send(str(self.routerId).encode(), block=False)
+            pipe.socket.send(str(self.mEp).encode(), block=False)
         except Exception as ex:
             print(repr(ex))
         self._pipeByPipeId[pipe.id] = pipe
         print(f'post_connect_cb: <{pipe.remote_address}::{pipe.id}>')
 
     def post_remove_cb(self, pipe):
-        routerId = self._routerIdByPipeId.get(pipe.id, None)
-        if routerId:
-            self._routerIdByPipeId.pop(pipe.id, None)
-            self._pipeIdByRouterId.pop(routerId, None)
-            print(f'disconnected: <{routerId}> aka <{pipe.remote_address}::{pipe.id}>')
+        mEp = self._mEpByPipeId.get(pipe.id, None)
+        if mEp:
+            self._mEpByPipeId.pop(pipe.id, None)
+            self._pipeIdByRouterId.pop(mEp, None)
+            print(f'disconnected: <{mEp}> aka <{pipe.remote_address}::{pipe.id}>')
         else:
             print(f'disconnected: <{pipe.local_address}::{pipe.id}>')
         self._pipeByPipeId.pop(pipe.id, None)
@@ -64,8 +64,8 @@ class Router:
                 self.running = False
                 await self._sock.close()
             for pipe in self._sock.pipes:
-                routerId = self._routerIdByPipeId[pipe.id]
-                print(f'Sending "{stuff}" to <{routerId}> aka <{pipe.remote_address}::{pipe.id}>')
+                mEp = self._mEpByPipeId[pipe.id]
+                print(f'Sending "{stuff}" to <{mEp}> aka <{pipe.remote_address}::{pipe.id}>')
                 await pipe.asend(stuff.encode())
 
     async def recv_eternally(self):
@@ -73,15 +73,15 @@ class Router:
             msg = await self._sock.arecv_msg()
             pipeId = msg.pipe.id
             content = msg.bytes.decode()
-            routerId = self._routerIdByPipeId.get(pipeId, None)
-            if routerId is None:
-                # first message from the remote peer on this pipe is its routerId
-                routerId = int(content)
-                self._routerIdByPipeId[pipeId] = routerId
-                self._pipeIdByRouterId[routerId] = pipeId
-                print(f'resolved: <{msg.pipe.local_address}::{pipeId}> to <{routerId}>')
+            mEp = self._mEpByPipeId.get(pipeId, None)
+            if mEp is None:
+                # first message from the remote peer on this pipe is its mEp
+                mEp = int(content)
+                self._mEpByPipeId[pipeId] = mEp
+                self._pipeIdByRouterId[mEp] = pipeId
+                print(f'resolved: <{msg.pipe.local_address}::{pipeId}> to <{mEp}>')
             else:
-                print(f'<{routerId}> aka <{msg.pipe.remote_address}::{pipeId}> says: "{content}"')
+                print(f'<{mEp}> aka <{msg.pipe.remote_address}::{pipeId}> says: "{content}"')
 
 
 async def main():

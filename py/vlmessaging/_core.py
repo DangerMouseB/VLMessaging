@@ -9,7 +9,7 @@
 
 
 # Python imports
-import itertools, logging, pynng, asyncio, weakref, collections, io, os, random, sys
+import itertools, logging, pynng, asyncio, weakref, collections, io, os, random, sys, uuid, traceback
 from amazon.ion import simpleion
 
 # local imports
@@ -25,13 +25,15 @@ from vlmessaging._utils.utils import monotonicTimeMs, coPopFront, pushBack, core
 
 _logger = logging.getLogger(__name__)
 random.seed(int.from_bytes(os.urandom(8), 'big'))
-_routerIdSeed = itertools.count(os.getpid())    # OPEN: random number instead? any advantages or security concern about using pid?
+_mEpSeed = itertools.count(os.getpid())    # OPEN: random number instead? any advantages or security concern about using pid?
 
 _STOP_DIALING_ME_AND_CLOSE = "STOP_DIALING_ME_AND_CLOSE"
 
-_DIRECTORY_CONNECTION_ID = 1
-_FIRST_CONNECTION_ID = _DIRECTORY_CONNECTION_ID + 1
-_MACHINE_HUB_ROUTER_ID = 0
+_ROUTER_REP = 0
+_DIRECTORY_REP = 1
+_FIRST_CONNECTION_ID = _DIRECTORY_REP + 1
+_HUB_ROUTER_ID = 1
+_NET_ROUTER_ID = 2
 _MAX_IPC_LISTEN_ATTEMPTS = 1000
 _DEFAULT_HEARTBEAT_ENTRIES_INTERVAL = 10_000
 
@@ -53,6 +55,13 @@ _eventPPNameById = {
     _CONNECTION_ATTEMPT_TIMEOUT: 'CONNECTION_ATTEMPT_TIMEOUT',
 }
 
+_SET_ROUTE_BACK_TO_ME = 'SET_ROUTE_BACK_TO_ME'
+
+_EP_MACHINE = "MACHINE"
+_EP_NETWORK = "NETWORK"
+
+_addressesInUse = set()
+
 _DEFAULT_LOCAL_CONNECTION_TIMESOUT = 2000
 
 class ExitMessageHandler(Exception): pass
@@ -62,19 +71,24 @@ class ExitMessageHandler(Exception): pass
 # Public Structs
 # **********************************************************************************************************************
 
-Addr = collections.namedtuple('Addr', ('endpointId', 'routerId', 'connectionId'))
+Addr = collections.namedtuple('Addr', (
+    'nEp',      # network level endpoint - e.g. "tcp://host:port"
+    'mEp',      # machine level endpoint - e.g. "ipc:///tmp/router_4353"
+    'rEp'       # router level endpoint - e.g. 1, 2, 3
+))
 def Addr__str__(self):
-    if self.routerId is None:
-        return f'<{self.connectionId}>'
-    elif self.endpointId is None:
-        splits = self.routerId.rsplit('_', 1)
-        return f'<{splits[-1]}:{self.connectionId}>'
+    if self.mEp is None:
+        return f'<{self.rEp}>'
+    elif self.nEp is None:
+        splits = self.mEp.rsplit('_', 1)
+        return f'<{splits[-1]}::{self.rEp}>'
     else:
-        splits = self.routerId.rsplit('_', 1)
-        return f'<{self.endpointId}:{splits[-1]}:{self.connectionId}>'
+        splits = self.mEp.rsplit('_', 1)
+        return f'<{self.nEp}::{splits[-1]}::{self.rEp}>'
 Addr.__str__ = Addr__str__
 
 
+# OPEN: add the connection's 'uuid'?
 Entry = collections.namedtuple('Entry', ('addr', 'service', 'params', 'vnets', 'perms'))
 
 
@@ -83,10 +97,10 @@ Perm =  collections.namedtuple('Perm', ('domain', 'permId'))
 
 class Msg:
 
-    __slots__ = ('fromAddr', 'toAddr', 'subject', '_msgId', '_replyId', 'contents', 'meta')
+    __slots__ = ('replyAddr', 'toAddr', 'subject', '_msgId', '_replyId', 'contents', 'meta')
 
     def __init__(self, toAddr, subject, contents=None):
-        self.fromAddr = None
+        self.replyAddr = None
         self.toAddr = toAddr
         self.subject = subject
         self._msgId = None
@@ -95,7 +109,7 @@ class Msg:
         self.meta = {}
 
     def reply(self, contents, *, subject=Missing):
-        answer = Msg(self.fromAddr, subject or self.subject, contents)
+        answer = Msg(self.replyAddr, subject or self.subject, contents)
         answer._replyId = self._msgId
         return answer
 
@@ -105,9 +119,9 @@ class Msg:
 
     def __repr__(self):
         if self._replyId is None:
-            return f'Msg({self.fromAddr!s} -> {self.toAddr!s} "{self.subject!s}" msgId: {self._msgId})'
+            return f'Msg({self.replyAddr!s} -> {self.toAddr!s} "{self.subject!s}" msgId: {self._msgId})'
         else:
-            return f'Msg({self.fromAddr!s} -> {self.toAddr!s} "{self.subject!s}" REPLY msgId: {self._msgId}, replyId: {self._replyId})'
+            return f'Msg({self.replyAddr!s} -> {self.toAddr!s} "{self.subject!s}" REPLY msgId: {self._msgId}, replyId: {self._replyId})'
 
 
 
@@ -117,7 +131,7 @@ class Msg:
 
 class Connection:
 
-    __slots__ = ('_router', '_msgArrivedFn', '_futureAndSubjectsByReplyId', '_msgIdSeed', 'addr', '__weakref__')
+    __slots__ = ('_router', '_msgArrivedFn', '_futureAndSubjectsByReplyId', '_msgIdSeed', 'addr', 'uuid', '__weakref__')
 
     def __init__(self, router, addr, fn):
         self._router = router
@@ -125,11 +139,12 @@ class Connection:
         self._futureAndSubjectsByReplyId = {}
         self._msgIdSeed = itertools.count(1)
         self.addr = addr
+        self.uuid = uuid.uuid4().hex
 
     async def send(self, msg, timeout=Missing, additional_subjects=Missing):
         # return reply, Missing if timeout exceeded or None if no timeout
         msg._msgId = next(self._msgIdSeed)
-        msg.fromAddr = self.addr
+        msg.replyAddr = self.addr
         if timeout:
             # semi-sync send - wait for reply or timeout
             loop = asyncio.get_running_loop()
@@ -231,10 +246,11 @@ class Connection:
             if not fut.done():
                 fut.set_result(Missing)
         # tell router
-        self._router._dropInboxFor(self.addr.connectionId)
+        self._router._dropInboxFor(self.addr.rEp)
 
-    def getDirectoryAddr(self):
-        return self._router._getDirectoryAddr()
+    @property
+    def directoryAddr(self):
+        return self._router._directoryAddr
 
     async def shutdown(self):
         self._router.shutdown()
@@ -248,45 +264,46 @@ class Connection:
 
 class Router:
 
+    # OPEN: add mode so can raise error if MACHINE mode is trying to connect to nEp, etc
     __slots__ = (
         '_name',
-        '_connectionById',
-        '_inboxById',                   # each connection's queue
-        '_connectionIdSeed',
-        '_routerId',
-        '_endpointId',
-        '_sbMachine',                   # machine (ipc) socket bundle
-        '_sbHub',                       # hub directory (ipc) socket bundle
-        '_sbNetwork',                   # network (tcp) socket bundle
-        '_directory',
-        '_canRunLocalHubDirectory',
+        '_mode',
+        '_connectionByREp',
+        '_inboxByREp',                  # each connection's queue
+        '_rEpSeed',
+        '_mEps',
+        '_nEps',
+        '_sbRouter',                    # router (ipc) socket bundle
+        '_sbHub',                       # hub directory (ipc) socket bundle - _routerSbByName
+        '_sbGateway',                   # gateway (ipc) socket bundle
+        '_sbNetwork',                   # network (tcp) socket bundle - _networkSbByEndpoint
         '_taskListChanged',
         '_isShuttingDown',              # an Event signalling that the router is shutting down
         '_isShuttingDownTask',          # a task that waits for the isShuttingDown event that connections can use to timeout
         '_hasShutdown',                 # an Event signalling that the router has shutdown
         '_scheduledCallbacksByFnId',
-        # _pipeByEndpointAndRouterId    # for a single hop - if not here then use the following
-        # _pipeByEndpointId
+        # _pipeByNEpAndMep                # for a definite single hop - if absent use the following (which result in multiple hop)
     )
 
     # PUBLIC API
 
-    def __init__(self, mode=VLM.MACHINE_MODE, canRunLocalHubDirectory=True, name=Missing):
+    def __init__(self, mode=VLM.MACHINE_MODE, name=Missing, options=Missing):
         if mode not in (VLM.LOCAL_MODE, VLM.MACHINE_MODE, VLM.NETWORK_MODE):
             raise ValueError(f'Unknown router mode "{mode}".')
 
         self._name = name
+        self._mode = mode
 
-        self._connectionById = weakref.WeakValueDictionary()
-        self._inboxById = {}
-        self._connectionIdSeed = itertools.count(_FIRST_CONNECTION_ID)
+        self._connectionByREp = weakref.WeakValueDictionary()
+        self._inboxByREp = {}
+        self._rEpSeed = itertools.count(_FIRST_CONNECTION_ID)
 
-        self._routerId = None
-        self._endpointId = None
-        self._sbMachine = Missing
+        self._mEps = []
+        self._nEps = []
+        self._sbRouter = Missing
         self._sbHub = Missing
+        self._sbGateway = Missing
         self._sbNetwork = Missing
-        self._canRunLocalHubDirectory = canRunLocalHubDirectory
 
         self._taskListChanged = asyncio.Event()
         self._isShuttingDown = asyncio.Event()
@@ -294,41 +311,23 @@ class Router:
         self._hasShutdown = asyncio.Event()
         self._scheduledCallbacksByFnId = {}
 
-
-        # figure the routerId and listen on a (local) socket
         if mode in (VLM.MACHINE_MODE, VLM.NETWORK_MODE):
-            self._sbMachine = _SocketBundle(self)
-            self._routerId = self._sbMachine.listen(next(_routerIdSeed), _ipcUrl, _MAX_IPC_LISTEN_ATTEMPTS)
+            id1 = next(_mEpSeed)
+            self.nEpListen('ipc:///tmp/router_{N}', id1, id1 + _MAX_IPC_LISTEN_ATTEMPTS)
 
-            # initial attempt to connect to machine hub directory
-            self._checkMachineHubConnection()
+        if mode is VLM.NETWORK_MODE:
+            self._sbNetwork = _NngSocketBundle(self, _EP_NETWORK)
 
-            # schedule periodic check of machine hub directory connection
-            self.scheduleCallback(self._checkMachineHubConnection, every=1000 + random.randint(-100, 200))
-
-        if mode == VLM.NETWORK_MODE:
-            # OPEN: only needs to listen if configured to do so or a connection wants to advertise itself on the
-            #       network - can create outgoing socket on demand when first message sent
-            self._endpointId = self._sbNetwork.listen(30000)
-            # - additionally will attempt to find network hub directories
-            # - will listen for remote machine peers only if an agent advertises itself on a network hub directory
-            # networkHubDirectoryPorts = [30000, 30001, 30002] - attempts to listen on port every x milliseconds
-            #   - adds network hub directory to machine hub directory and own directory and forwards messages from the port
-            #     to the network hub directory
-            # isIntraMachineRouter - allows forwarding of messages between other machine routers and network routers
-
-        if name is Missing: self._name = f'router_{self._routerId}'
-        # OPEN: pass relevant network parameters here, e.g. network hub addresses etc
-        self._directory = Directory(self, autoDrop=False)   # OPEN: False for dev so needs setting elsewhere
+        if name is Missing: self._name = f'router_{self._mEps[0]}' if self._mEps else 'local'
 
         asyncio.create_task(self._mainLoop())
 
 
     def newConnection(self, fn=Missing):
-        return self._newConnection(next(self._connectionIdSeed), fn)
+        return self._newConnection(next(self._rEpSeed), fn)
 
     def shutdown(self):
-        self._connectionById = {}
+        self._connectionByREp = {}
         self._isShuttingDown.set()
 
     @property
@@ -355,30 +354,65 @@ class Router:
         if fnId := id(fn) in self._scheduledCallbacksByFnId:
             self._scheduledCallbacksByFnId.pop(fnId).cancel()
 
+    def nEpListen(self, nEp, start=Missing, end=Missing):
+        return self._listen(nEp, start, end)
+
+    def mEpListen(self, mEp, start=Missing, end=Missing):
+        return self._listen(mEp, start, end)
+
+    def _listen(self, ep, start=Missing, end=Missing):
+        # OPEN: can rework this when we're ready to implement a connection manager
+        if ep.startswith('ipc:///tmp/router_'):
+            assert self._mode is VLM.MACHINE_MODE or self._mode is VLM.NETWORK_MODE
+            assert self._sbRouter is Missing
+            self._sbRouter = _NngSocketBundle(self, _EP_MACHINE)
+            return self._sbRouter.mEpListen(ep, start, end)
+        elif ep.startswith('ipc:///tmp/hub_'):
+            assert self._mode is VLM.MACHINE_MODE or self._mode is VLM.NETWORK_MODE
+            assert self._sbHub is Missing
+            assert end is Missing
+            self._sbHub = _NngSocketBundle(self, _EP_MACHINE)
+            return self._sbRouter.mEpListen(ep, start if start else 1, start if start else 1)
+        elif ep.startswith('ipc:///tmp/gateway_'):
+            assert self._mode is VLM.NETWORK_MODE
+            assert self._sbGateway is Missing
+            assert end is Missing
+            self._sbGateway = _NngSocketBundle(self, _EP_MACHINE)
+            return self._sbRouter.mEpListen(ep, start if start else 1, start if start else 1)
+        elif ep.startswith('ipc:///'):
+            # either a hub or gateway listen
+            raise NotYetImplemented('listen - ipc address must be /tmp/router_, /tmp/hub_ or /tmp/gateway_')
+        elif ep.startswith('tcp://'):
+            assert self._mode is VLM.NETWORK_MODE
+            if start is Missing: assert end is Missing
+            start = start if start else 1
+            end = end if end else start + 1
+            return self._sbNetwork.nEpListen(ep, start, end)
+
 
     # LOCAL CONNECTION MANAGEMENT
 
-    def _newConnection(self, connectionId, fn):
-        c = Connection(self, Addr(self._endpointId, self._routerId, connectionId), fn)
-        assert connectionId not in self._connectionById
-        self._connectionById[connectionId] = c
-        self._inboxById[connectionId] = Queue()
+    def _newConnection(self, rEp, fn):
+        c = Connection(self, Addr(None, self._mEps[0] if self._mEps else None, rEp), fn)
+        assert rEp not in self._connectionByREp
+        self._connectionByREp[rEp] = c
+        self._inboxByREp[rEp] = Queue()
         self._taskListChanged.set()
         return c
 
-    def _getDirectoryAddr(self):
-        return Addr(None, self._routerId, _DIRECTORY_CONNECTION_ID)
+    @property
+    def _directoryAddr(self):
+        return Addr(None, None, _DIRECTORY_REP)
 
-    def _dropInboxFor(self, connectionId):
-        self._inboxById.pop(connectionId, None)
+    def _dropInboxFor(self, rEp):
+        self._inboxByREp.pop(rEp, None)
         self._taskListChanged.set()
 
-
-    def _cancelConnectingToLocal(self, routerId):
-        if (accumulatedMsgs := self._accumulatedMsgsByRouterId.get(routerId, Missing)) is Missing: return
-        self._accumulatedMsgsByRouterId.pop(routerId, None)
+    def _cancelConnectingToLocal(self, mEp):
+        if (msgAccumulator := self._accumulatedMsgsByRouterId.get(mEp, Missing)) is Missing: return
+        self._accumulatedMsgsByRouterId.pop(mEp, None)
         self._taskListChanged.set()
-        for msg in accumulatedMsgs.msgs():
+        for msg in msgAccumulator.msgs():
             if msg.subject == VLM.MSG_NOT_DELIVERED:
                 # don't get into a loop of undeliverable messages
                 pass
@@ -391,12 +425,12 @@ class Router:
     def _checkMachineHubConnection(self):
         # OPEN: implement
         pass
-        # if _MACHINE_HUB_ROUTER_ID not in self._sbHub._pipesByRemoteId:
+        # if _HUB_ROUTER_ID not in self._sbHub._pipesByEp:
         #     if not self._sHubIn and self._canRunLocalHubDirectory:
         #         # try to become the machine hub directory
         #         try:
         #             s = pynng.Pair1(polyamorous=True)
-        #             s.listen(_ipcUrl(_MACHINE_HUB_ROUTER_ID))
+        #             s.listen(_ipcUrl(_HUB_ROUTER_ID))
         #             s.add_post_pipe_connect_cb(self._onHubInConnect)
         #             s.add_post_pipe_remove_cb(self._onHubInDisconnect)
         #             self._sHubIn = s
@@ -407,18 +441,18 @@ class Router:
         #         _sHubOut = pynng.Pair1(polyamorous=True)
         #         _sHubOut.add_post_pipe_connect_cb(self._sHubOutPostConnectCb)
         #         _sHubOut.add_post_pipe_remove_cb(self._sHubOutPostRemoveCb)
-        #         _sHubOut.dial(_ipcUrl(_MACHINE_HUB_ROUTER_ID), block=False)
+        #         _sHubOut.dial(_ipcUrl(_HUB_ROUTER_ID), block=False)
 
 
     # ROUTING
 
     def _route(self, msg):
-        endpointId, routerId, cId = msg.toAddr
-        if not endpointId:
-            if routerId == self._routerId:
-                inbox = self._inboxById.get(cId, Missing)
+        nEp, mEp, rEp = msg.toAddr
+        if nEp is None or nEp in self._nEps:
+            if mEp is None or mEp in self._mEps:
+                inbox = self._inboxByREp.get(rEp, Missing)
                 if inbox:
-                    _PPMsg(f'route', f'connId: {cId}, msgId: {msg._msgId}')
+                    _PPMsg(f'route', f'connId: {rEp}, msgId: {msg._msgId}')
                     pushBack(inbox, msg)
                 else:
                     if msg.subject == VLM.MSG_NOT_DELIVERED:
@@ -430,9 +464,12 @@ class Router:
                         _PPMsg(f'unroutable', msg._msgId)
                         self._route(reply)
             else:
-                self._sbMachine._route(routerId, msg)
+                if self._mode is VLM.LOCAL_MODE: raise ValueError(f'{self._mode} router ("{self._name}") cannot route to another router.')
+                self._sbRouter._mRoute(msg, mEp)
         else:
-            self._sbNetwork.route(endpointId, msg)
+            if self._mode is not VLM.NETWORK_MODE: raise ValueError(f'{self._mode} router ("{self._name}") cannot route to another machine.')
+            self._sbNetwork._nRoute(msg, nEp)
+
 
 
     # MAIN LOOP
@@ -452,98 +489,103 @@ class Router:
 
             # process done tasks (always just one?)
             for task in done:
-                details = taskList.pop(task)                                           # take task from the list
+                details = taskList.pop(task)                                                # take task from the list
                 _PPMsg(f'main', f'{self._name} - {_eventPPNameById[details.type]}')
 
-                if details.type == _MSG_ARRIVED:
-                    cId = details.args
-                    msg = task.result()
-                    if (conn := self._connectionById.get(cId, Missing)) is not Missing:
-                        inbox = self._inboxById[cId]
-                        # we need to schedule a new task here rather than await otherwise we block processing other events
-                        asyncio.create_task(conn._deliver(msg))
-                        taskList[asyncio.create_task(inbox.get())] = details           # add task to bottom of list
+                try:
 
-                elif details.type == _SOCK_RECV:
-                    incoming = task.result()
-                    sb = details.args
-                    pipe = incoming.pipe
-                    if pipe.id not in sb._remoteIdByPipeId:
-                        # first message on this pipe is the remoteId
-                        remoteId = sys.intern(incoming.bytes.decode())
-                        if (pipeByPipeId := sb._pipesByRemoteId.get(remoteId, Missing)) is Missing:
-                            _PPMsg('main::ipc_recv', f'{self._name} received remoteId {remoteId} for channel {pipe.url}')
-                            pipeByPipeId = sb._pipesByRemoteId[remoteId] = {}
-                        else:
-                            _PPMsg('main::ipc_recv', f'{self._name} - WARNING: already connected to {remoteId} - adding additional connection')
-                            sb._remoteIdsWithExcessPipes.add(remoteId)
-                        sb._remoteIdByPipeId[pipe.id] = remoteId
-                        pipeByPipeId[pipe.id] = pipe
-                        if (accumulatedMsgs := sb._accumulatedMsgsByRemoteId.pop(remoteId, Missing)) is not Missing:
-                            for msg in accumulatedMsgs.msgs:
-                                _PPMsg('main::ipc_recv', f'{self._name} - sending accumulated {msg}')
-                                cosend(pipe, _msgAsBytes(msg))
-                    else:
+                    if details.type == _MSG_ARRIVED:
+                        rEp = details.args
+                        msg = task.result()
+                        if (conn := self._connectionByREp.get(rEp, Missing)) is not Missing:
+                            inbox = self._inboxByREp[rEp]
+                            # we need to schedule a new task here rather than await otherwise we block processing other events
+                            asyncio.create_task(conn._deliver(msg))
+                            taskList[asyncio.create_task(inbox.get())] = details           # add task to bottom of list
+
+                    elif details.type == _SOCK_RECV:
+                        incoming = task.result()
+                        sb = details.args
+                        pipe = incoming.pipe
                         msg = _msgFromBytes(incoming.bytes)
-                        self._route(msg)
-                    taskList[corecv(sb.sock)] = details                                 # add task to bottom of list
+                        if msg.subject == _SET_ROUTE_BACK_TO_ME:
+                            if pipe.id not in (sb._epByPipeId, sb._ep):
+                                _PPMsg('main::SOCK_RECV', f'{self._name} received first message on channel {pipe.url}')
+                                otherEp = msg.contents
+                                if (pipeByPipeId := sb._pipesByEp.get(otherEp, Missing)) is Missing:
+                                    _PPMsg('main::SOCK_RECV', f'{self._name} received otherEp {otherEp} for channel {pipe.url}')
+                                    pipeByPipeId = sb._pipesByEp[otherEp] = {}
+                                else:
+                                    _PPMsg('main::SOCK_RECV', f'{self._name} - WARNING: already connected to {otherEp} - adding additional connection')
+                                    sb._epsWithExcessPipes.add(otherEp)
+                                sb._epByPipeId[pipe.id] = otherEp
+                                pipeByPipeId[pipe.id] = pipe
+                        else:
+                            _PPMsg('main::SOCK_RECV', f'{self._name} - routing {msg}')
+                            self._route(msg)
+                        taskList[corecv(sb.sock)] = details                                 # add task to bottom of list
 
-                elif details.type == _CONNECTION_ATTEMPT_TIMEOUT:
-                    # OPEN: cancel the dialer if it is still trying to connect, return unroutable messages to sender
-                    raise NotYetImplemented('_CONNECTION_ATTEMPT_TIMEOUT')
-                    # _accumulatedMsgsByRouterId
+                    elif details.type == _CONNECTION_ATTEMPT_TIMEOUT:
+                        # OPEN: cancel the dialer if it is still trying to connect, return unroutable messages to sender
+                        raise NotYetImplemented('_CONNECTION_ATTEMPT_TIMEOUT')
+                        # _accumulatedMsgsByRouterId
 
-                elif details.type == _TIMER:
-                    fnId = details.args
-                    raise NotYetImplemented('_TIMER')
+                    elif details.type == _TIMER:
+                        fnId = details.args
+                        raise NotYetImplemented('_TIMER')
 
-                elif details.type == _TASKLIST_CHANGED:
-                    # remove old tasks that are no longer needed
-                    tasksToRemove = []
-                    for t, m in taskList.items():
-                        if m.type == _MSG_ARRIVED and m.args not in self._connectionById:
-                            tasksToRemove.append(t)   # drop closed connections
-                    for t in tasksToRemove:
-                        # _PPMsg(f'dropping', f'{tasksToRemove[t]}')
-                        t.cancel('no longer needed')
-                        await until(timeout=0)
-                        # t.uncancel()    # "in cases when suppressing asyncio.CancelledError is truly desired, it is necessary to also call uncancel()"
-                        taskList.pop(t)
-                    await asyncio.gather(*tasksToRemove, return_exceptions=True)
+                    elif details.type == _TASKLIST_CHANGED:
+                        # remove old tasks that are no longer needed
+                        tasksToRemove = []
+                        for t, m in taskList.items():
+                            if m.type == _MSG_ARRIVED and m.args not in self._connectionByREp:
+                                tasksToRemove.append(t)   # drop closed connections
+                        for t in tasksToRemove:
+                            # _PPMsg(f'dropping', f'{tasksToRemove[t]}')
+                            t.cancel('no longer needed')
+                            await until(timeout=0)
+                            # t.uncancel()    # "in cases when suppressing asyncio.CancelledError is truly desired, it is necessary to also call uncancel()"
+                            taskList.pop(t)
+                        await asyncio.gather(*tasksToRemove, return_exceptions=True)
 
-                    # add any inbox tasks that are needed
-                    for cId, conn in self._connectionById.items():
-                        if _Details(_MSG_ARRIVED, cId) not in taskList.values():
-                            taskList[coPopFront(self._inboxById[cId])] = _Details(_MSG_ARRIVED, cId)
-                            _PPMsg(f'main', f'{self._name} - added MSG_ARRIVED task for connId: {cId}')
+                        # add any inbox tasks that are needed
+                        for rEp, conn in self._connectionByREp.items():
+                            if _Details(_MSG_ARRIVED, rEp) not in taskList.values():
+                                taskList[coPopFront(self._inboxByREp[rEp])] = _Details(_MSG_ARRIVED, rEp)
+                                _PPMsg(f'main', f'{self._name} - added MSG_ARRIVED task for connId: {rEp}')
 
-                    # add any socket tasks that are needed
-                    if self._sbMachine and _Details(_SOCK_RECV, self._sbMachine) not in taskList.values():
-                        taskList[corecv(self._sbMachine.sock)] = _Details(_SOCK_RECV, self._sbMachine)
-                        _PPMsg(f'main', f'{self._name} - added machine SOCK_RECV task')
+                        # add any socket tasks that are needed
+                        if self._sbRouter and _Details(_SOCK_RECV, self._sbRouter) not in taskList.values():
+                            taskList[corecv(self._sbRouter.sock)] = _Details(_SOCK_RECV, self._sbRouter)
+                            _PPMsg(f'main', f'{self._name} - added machine SOCK_RECV task')
 
-                    if self._sbHub and _Details(_SOCK_RECV, self._sbHub) not in taskList.values():
-                        taskList[corecv(self._sbHub.sock)] = _Details(_SOCK_RECV, self._sbHub)
-                        _PPMsg(f'main', f'{self._name} - added hub SOCK_RECV task')
+                        if self._sbHub and _Details(_SOCK_RECV, self._sbHub) not in taskList.values():
+                            taskList[corecv(self._sbHub.sock)] = _Details(_SOCK_RECV, self._sbHub)
+                            _PPMsg(f'main', f'{self._name} - added hub SOCK_RECV task')
 
-                    if self._sbNetwork and _Details(_SOCK_RECV, self._sbNetwork) not in taskList.values():
-                        taskList[corecv(self._sbNetwork.sock)] = _Details(_SOCK_RECV, self._sbNetwork)
-                        _PPMsg(f'main', f'{self._name} - added network SOCK_RECV task')
+                        if self._sbNetwork and _Details(_SOCK_RECV, self._sbNetwork) not in taskList.values():
+                            taskList[corecv(self._sbNetwork.sock)] = _Details(_SOCK_RECV, self._sbNetwork)
+                            _PPMsg(f'main', f'{self._name} - added network SOCK_RECV task')
 
 
-                    # scheduled callbacks
-                    # for fnId, cb in self._scheduledCallbacksByFnId.items():
-                    #     if (_TIMER, fnId) not in taskList.values():
+                        # scheduled callbacks
+                        # for fnId, cb in self._scheduledCallbacksByFnId.items():
+                        #     if (_TIMER, fnId) not in taskList.values():
 
-                    self._taskListChanged.clear()
-                    taskList[taskOnEvent(self._taskListChanged)] = details              # add task to bottom of list
+                        self._taskListChanged.clear()
+                        taskList[taskOnEvent(self._taskListChanged)] = details              # add task to bottom of list
 
-                elif details.type == _SHUTDOWN_TRIGGERED:
-                    running = False
-                    break
+                    elif details.type == _SHUTDOWN_TRIGGERED:
+                        running = False
+                        break
 
-                else:
-                    raise ProgrammerError(f'Unknown monitor type "{details.type}".')
+                    else:
+                        raise ProgrammerError(f'Unknown monitor type "{details.type}".')
+
+                except BaseException as ex:
+                    print(traceback.format_exc())
+                    _PPMsg('!!!!', f'Error processing {_eventPPNameById[details.type]} in router {self._name}: {ex}')
+                    raise
 
         for t in pending:
             t.cancel()
@@ -551,10 +593,10 @@ class Router:
         for t in taskList.keys():
             t.cancel()
             await until(timeout=0)
-        if self._sbMachine:
-            self._sbMachine.close()
-        if self._sbNetwork:
-            self._sbNetwork.close()
+        if self._sbRouter: self._sbRouter.close()
+        if self._sbHub: self._sbHub.close()
+        if self._sbGateway: self._sbGateway.close()
+        if self._sbNetwork: self._sbNetwork.close()
         self._hasShutdown.set()
         _PPMsg('shutdown', self._name)
 
@@ -562,36 +604,38 @@ class Router:
     # DISPLAY
 
     def __str__(self):
-        return f'Router<{self._name}::{self._routerId}>'
+        return f'Router<{self._name}::{self._mEps[0] if self._mEps else "local"}>'
 
 
 
-class _SocketBundle:
+class _NngSocketBundle:
     __slots__ = (
         '_router',
-        '_remoteId',
-        '_urlFn',
+        '_epType',
+        '_ep',
         'sock',
-        '_pipesByRemoteId',             # pipe by pipeId by routerId - so we know which pipe to send a msg down
-        '_remoteIdByPipeId',            # so we know which remote a msg has come from - not strictly required except for validating a from address?
-        '_remoteIdsWithExcessPipes',
-        '_dialerByRemoteId',            # so we can cancel dialing if we need to
-        '_accumulatedMsgsByRemoteId',   # to be checked periodically for connection, reply with unroutable on time out
+        '_pipesByEp',               # pipe by pipeId by ep - so we know which pipe to send a msg down
+        '_epByPipeId',              # so we know which remote thing a msg has directly come from
+        '_epsWithExcessPipes',
+        '_dialerByEp',              # so we can cancel dialing if we need to
+        '_msgAccumulatorByEp',      # to be checked periodically for connection, reply with unroutable on time out
     )
 
 
     # LIFECYCLE
 
-    def __init__(self, router):
+    def __init__(self, router, epType):
         self._router = router
-        self._remoteId = Missing
-        self._urlFn = Missing
-        self.sock = Missing
-        self._pipesByRemoteId = {}
-        self._remoteIdByPipeId = {}
-        self._remoteIdsWithExcessPipes = set()
-        self._dialerByRemoteId = {}
-        self._accumulatedMsgsByRemoteId = {}
+        self._epType = epType
+        self._ep = Missing
+        self.sock = pynng.Pair1(polyamorous=True)
+        self.sock.add_post_pipe_connect_cb(self._onConnect)
+        self.sock.add_post_pipe_remove_cb(self._onDisconnect)
+        self._pipesByEp = {}
+        self._epByPipeId = {}
+        self._epsWithExcessPipes = set()
+        self._dialerByEp = {}
+        self._msgAccumulatorByEp = {}
 
     def close(self):
         if self.sock:
@@ -601,80 +645,154 @@ class _SocketBundle:
 
     # CONNECTION MANAGEMENT
 
-    def listen(self, remoteIdSeed, urlFn, maxAttempts):
-        # OPEN: figure out how to recover from AddressInUse properly rather than just trying a new id - in the same
-        #       process in ipc mode it breaks the ability of a prior listening socket to be connected to (I suppose the
-        #       listener pointer is changed of something?)
-        self._urlFn = urlFn
-        self._remoteId = self._urlFn(remoteIdSeed)
-        i = 0
-        while i < maxAttempts:
-            self.sock = pynng.Pair1(polyamorous=True)
-            try:
-                self.sock.listen(self._remoteId)
-                self.sock.add_post_pipe_connect_cb(self._onConnect)
-                self.sock.add_post_pipe_remove_cb(self._onDisconnect)
-                _PPMsg('listening', f'{self._router._name or str(self._remoteId)} - {self._remoteId}')
-                break
-            except pynng.exceptions.AddressInUse as ex:
-                for l in self.sock.listeners:
-                    l.close()
-                self.sock.close()
-                remoteIdSeed += 1
-                self._remoteId = self._urlFn(remoteIdSeed)
-                i += 1
-        if i >= maxAttempts:
-            raise RuntimeError(f'Unable to find a free ipc address.')
-        self._router._taskListChanged.set()
-        return self._remoteId
+    def nEpListen(self, template, id1, id2):
+        ep = self._listen(template, id1, id2)
+        if ep not in self._router._nEps:
+            self._router._nEps.append(ep)
+        return ep
 
-    def _dial(self, remoteId, timeout):
-        assert remoteId not in self._accumulatedMsgsByRemoteId
-        accumulatedMsgs = self._accumulatedMsgsByRemoteId[remoteId] = _AccumulatedMessages(monotonicTimeMs() + timeout)
-        self._dialerByRemoteId[remoteId] = dial(self.sock, remoteId, block=False)
-        _PPMsg('dialing_router', f'{self._router._name} dialing {remoteId}')
-        return accumulatedMsgs
+    def mEpListen(self, template, id1, id2):
+        ep = self._listen(template, id1, id2)
+        if ep not in self._router._mEps:
+            self._router._mEps.append(ep)
+        return ep
 
-    def _completeConnectingToLocal(self, msgsAwaitingConnection):
-        # send all the queued messages awaiting connection to the newly connected router
-        for msg in msgsAwaitingConnection.msgs():
-            self._route(msg)
-        self._accumulatedMsgsByRemoteId.pop(msgsAwaitingConnection.routerId, None)
+    def _listen(self, template, id1, id2):
+        assert id1 < id2
+        while id1 <= id2:
+            sockAddr = template.format(N=id1)
+            if sockAddr not in _addressesInUse:
+                listener = Missing
+                try:
+                    listener = self.sock.listen(sockAddr)
+                    _PPMsg('listening', f'{self._router._name or str(self._ep)} - {self._ep}')
+                    break
+                except pynng.exceptions.AddressInUse as ex:
+                    # OPEN: figure out how to recover from AddressInUse properly rather than just trying a new id - in the
+                    #       same process in ipc mode it breaks the ability of a prior listening socket to be connected to
+                    #       (I suppose the listener pointer is changed or something?)
+                    _addressesInUse.add(sockAddr)
+                id1 += 1
+        if id1 > id2:
+            raise RuntimeError(f'Unable to find a free address.')
+        self._ep = sockAddr
+        _addressesInUse.add(sockAddr)
         self._router._taskListChanged.set()
+        return self._ep
+
+    def _dial(self, ep, timeout):
+        assert ep not in self._msgAccumulatorByEp
+        msgAccumulator = self._msgAccumulatorByEp[ep] = _MsgAccumulator(monotonicTimeMs() + timeout)
+        self._dialerByEp[ep] = dial(self.sock, ep, block=False)
+        _PPMsg('dialing_router', f'{self._router._name} dialing {ep}')
+        return msgAccumulator
 
 
     # SOCKET CALLBACKS
 
     def _onConnect(self, pipe):
-        print(self._router._name)
-        _PPMsg('connect', f'{self._router._name} - {pipeConnectionType(pipe)} on channel {pipe.url}')
         try:
-            # send my router id to the remote peer as the first message on this pipe
-            # comes in on a different thread so can't use event loop on main thread
-            send(pipe, str(self._remoteId).encode(), block=False)
+            if pipe.url.startswith('tcp://'):
+                if f'tcp://{pipe.local_address}' == self._ep:
+                    direction = 'incoming'
+                    self._onIncomingTcpConnect(pipe)
+                else:
+                    direction = 'outgoing'
+                    self._onOutGoingTcpConnect(pipe)
+            else:
+                try:
+                    pipe.listener
+                    direction = 'incoming'
+                    self._onIncomingIpcConnect(pipe)
+                except TypeError:
+                    direction = 'unknown'
+                    pipe.dialer                             # shouldn't raise but let's catch it anyway
+                    direction = 'outgoing'
+                    self._onOutGoingIpcConnect(pipe)
         except Exception as ex:
-            _PPMsg('router_connect', f'#err {self._router._name} exception - {repr(ex)}')
+            _PPMsg('onConnect', f'#err {self._router._name} - {direction} via {pipe.url} - {repr(ex)}')
+
+    def _onIncomingTcpConnect(self, pipe):
+        # for a tcp connection we only know the dialer's randomly assigned outgoing address, so we can't set up any
+        # routing unless they send a message identifying themselves as a reply network ep
+        ep = f'tcp://{pipe.remote_address}'
+        _PPMsg('onConnectTcpIn', f'{self._router._name} - incoming from randomly assigned {ep}')
+
+    def _onOutGoingTcpConnect(self, pipe):
+        localNEpRandomPort = f'tcp://{pipe.local_address}'
+        ep = f'tcp://{pipe.remote_address}'
+        _PPMsg('onConnectTcpOut', f'{self._router._name} - connected to {ep} from {localNEpRandomPort}')
+        self._pipesByEp[ep] = pipe
+        # tell the other end who we are if we are listening on a known network ep else don't tell them anything
+        if self._ep:
+            msg = Msg(Addr(None, None, _ROUTER_REP), _SET_ROUTE_BACK_TO_ME, self._ep)
+            msg.replyAddr = Addr(None, None, None)
+            send(pipe, _msgAsBytes(msg), block=False)
+        if (msgAccumulator := self._msgAccumulatorByEp.pop(ep, Missing)) is not Missing:
+            for msg in msgAccumulator.msgs:
+                _PPMsg('onConnectIpcOut', f'{self._router._name} - sending accumulated {msg}')
+                send(pipe, _msgAsBytes(msg), block=False)
+
+    def _onIncomingIpcConnect(self, pipe):
+        # in nng ipc we don't know who the remote is until they send a message about themselves, they know who we are
+        _PPMsg('onConnectIpcIn', f'{self._router._name} - incoming on {pipe.url}')
+
+    def _onOutGoingIpcConnect(self, pipe):
+        # we know who we are connecting to since we dialed them so send our id right away
+        ep = pipe.url
+        _PPMsg('onConnectIpcOut', f'{self._router._name} - connected to {ep}')
+        if (pipeByPipeId := self._pipesByEp.get(ep, Missing)) is Missing:
+            pipeByPipeId = self._pipesByEp[ep] = {}
+        if ep not in pipeByPipeId: pipeByPipeId[pipe.id] = ep
+        msg = Msg(Addr(None, None, _ROUTER_REP), subject=_SET_ROUTE_BACK_TO_ME, contents=self._ep)
+        msg.replyAddr = Addr(None, None, None)
+        send(pipe, _msgAsBytes(msg), block=False)
+        if (msgAccumulator := self._msgAccumulatorByEp.pop(ep, Missing)) is not Missing:
+            for msg in msgAccumulator.msgs:
+                _PPMsg('onConnectIpcOut', f'{self._router._name} - sending accumulated {msg}')
+                send(pipe, _msgAsBytes(msg), block=False)
 
     def _onDisconnect(self, pipe):
-        remoteId = self._remoteIdByPipeId.pop(pipe.id, Missing)
-        if remoteId:
-            if (pipeByPipeId := self._pipesByRemoteId.get(remoteId, Missing)) is not Missing:
-                pipeByPipeId.pop(pipe.id, None)
-            _PPMsg('router_disconnect', f'{self._router._name} <{remoteId}> - {pipeConnectionType(pipe)} on channel <{pipe.url}>')
-        else:
-            _PPMsg('router_disconnect', f'{self._router._name} - {pipeConnectionType(pipe)} on channel {pipe.url}')
+        try:
+            remoteId = self._epByPipeId.pop(pipe.id, Missing)
+            if remoteId:
+                if (pipeByPipeId := self._pipesByEp.get(remoteId, Missing)) is not Missing:
+                    pipeByPipeId.pop(pipe.id, None)
+                _PPMsg('onDisconnect', f'{self._router._name} <{remoteId}> - {pipeConnectionType(pipe)} on channel <{pipe.url}>')
+            else:
+                _PPMsg('onDisconnect', f'{self._router._name} - {pipeConnectionType(pipe)} on channel {pipe.url}')
+        except Exception as ex:
+            _PPMsg('onDisconnect', f'#err {self._router._name} - error processing disconnect on channel {pipe.url}: {repr(ex)}')
 
 
     # ROUTING
 
-    def _route(self, remoteId, msg):
-        if (pipeByPipeId := self._pipesByRemoteId.get(remoteId, Missing)) is Missing:
-            if (accumulatedMsgs := self._accumulatedMsgsByRemoteId.get(remoteId, Missing)) is Missing:
-                accumulatedMsgs = self._dial(remoteId, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
-            accumulatedMsgs.queueMsg(msg)
+    def _mRoute(self, msg, ep):
+        if (pipeByPipeId := self._pipesByEp.get(ep, Missing)) is Missing:
+            if (msgAccumulator := self._msgAccumulatorByEp.get(ep, Missing)) is Missing:
+                msgAccumulator = self._dial(ep, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
+            msgAccumulator.queueMsg(msg)
         else:
+            if msg.replyAddr.mEp is None:
+                raise NotYetImplemented('msg.replyAddr.mEp is None')
             pipe = firstValue(pipeByPipeId)
-            cosend(pipe, _msgAsBytes(msg))  # we might be able to await this instead but not sure we gain much
+            cosend(pipe, _msgAsBytes(msg))  # we might be able to async send this instead but not sure we gain much
+
+    def _nRoute(self, msg, ep):
+        if (pipeByPipeId := self._pipesByEp.get(ep, Missing)) is Missing:
+            if (msgAccumulator := self._msgAccumulatorByEp.get(ep, Missing)) is Missing:
+                msgAccumulator = self._dial(ep, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
+            msgAccumulator.queueMsg(msg)
+        else:
+            if msg.replyAddr.nEp is None:
+                raise NotYetImplemented('msg.replyAddr.nEp is None')
+            pipe = firstValue(pipeByPipeId)
+            cosend(pipe, _msgAsBytes(msg))  # we might be able to async send this instead but not sure we gain much
+
+
+
+    def __repr__(self):
+        return f'SocketBundle<{self._router._name}::{self._ep}>'
 
 
 
@@ -687,23 +805,39 @@ class Directory:
     #       but what about telling a directory that a connection didn't get delivered
     __slots__ = (
         '_conn',
+        '_peers',                   # addr
         '_entries',                 # [Entry]
         '_potentiallyStale',        # set() of addr we haven't heard from in a while
         '_heartbeatEntriesInterval',
     )
 
-    def __init__(self, router, autoDrop=True, heartbeatEntriesTimeout=Missing):
-        if router._connectionById.get(_DIRECTORY_CONNECTION_ID, Missing) is not Missing:
+    def __init__(self,
+            router,
+            vnets=Missing,          # list
+            hubListen=Missing,      # mEp or Missing
+            hubs=Missing,           # list of mEp
+            gatewayListen=Missing,  # mEp
+            gateways=Missing,       # list of mEp
+            netListen=Missing,      # nEp or Missing
+            netHubs=Missing,        # list of nEp
+            beaconAnnounce=Missing, # beacon address to announce myself on
+            beaconListen=Missing,   # address to listen for beacons on
+            autoDrop=True,
+            heartbeatEntriesTimeout=10000,
+    ):
+
+        if router._connectionByREp.get(_DIRECTORY_REP, Missing) is not Missing:
             raise RuntimeError('A Directory already exists on this router')
-        self._conn = router._newConnection(_DIRECTORY_CONNECTION_ID, self.msgArrived)
+        self._conn = router._newConnection(_DIRECTORY_REP, self.msgArrived)
         self._heartbeatEntriesInterval = _DEFAULT_HEARTBEAT_ENTRIES_INTERVAL if heartbeatEntriesTimeout is Missing else heartbeatEntriesTimeout
         if autoDrop:
             router.scheduleCallback(self._heartbeatEntries, every=self._heartbeatEntriesInterval)
         self._entries = []
         self._potentiallyStale = set()
 
+
     async def msgArrived(self, msg):
-        self._potentiallyStale.discard(msg.fromAddr)
+        self._potentiallyStale.discard(msg.replyAddr)
 
         if msg.subject == VLM.REGISTER_ENTRY:
             addr, service, params, vnets, perms = msg.contents
@@ -748,26 +882,26 @@ class Directory:
 def _msgAsBytes(msg):
     bytes = io.BytesIO()
     simpleion.dump('1', bytes, binary=True)
-    simpleion.dump(msg.fromAddr.endpointId, bytes, binary=True)         # string or None
-    simpleion.dump(msg.fromAddr.routerId, bytes, binary=True)           # string
-    simpleion.dump(msg.fromAddr.connectionId, bytes, binary=True)       # int
-    simpleion.dump(msg.toAddr.endpointId, bytes, binary=True)            # string or None
-    simpleion.dump(msg.toAddr.routerId, bytes, binary=True)             # string
-    simpleion.dump(msg.toAddr.connectionId, bytes, binary=True)         # int
-    simpleion.dump(msg.subject, bytes, binary=True)                     # string
-    simpleion.dump(msg._msgId, bytes, binary=True)                      # int
-    simpleion.dump(msg._replyId, bytes, binary=True)                    # int or None
-    simpleion.dump(msg.contents, bytes, binary=True)                    # any ION serializable
-    simpleion.dump(msg.meta, bytes, binary=True)                        # dict
+    simpleion.dump(msg.replyAddr.nEp, bytes, binary=True)       # string or None
+    simpleion.dump(msg.replyAddr.mEp, bytes, binary=True)       # string or None
+    simpleion.dump(msg.replyAddr.rEp, bytes, binary=True)       # int or None
+    simpleion.dump(msg.toAddr.nEp, bytes, binary=True)          # string or None
+    simpleion.dump(msg.toAddr.mEp, bytes, binary=True)          # string
+    simpleion.dump(msg.toAddr.rEp, bytes, binary=True)          # int
+    simpleion.dump(msg.subject, bytes, binary=True)             # string
+    simpleion.dump(msg._msgId, bytes, binary=True)              # int
+    simpleion.dump(msg._replyId, bytes, binary=True)            # int or None
+    simpleion.dump(msg.contents, bytes, binary=True)            # any ION serializable
+    simpleion.dump(msg.meta, bytes, binary=True)                # dict
     return bytes.getvalue()
 
 def _msgFromBytes(bytes):
     try:
         values = simpleion.load(io.BytesIO(bytes), single_value=False)
-        schema, fromEndpointId, fromRouterId, fromConnId, toEndpointId, toRouterId, toConnId, subject, _msgId, _replyId, contents, meta = values
+        schema, replyEndpoint, replyRouterId, replyConnId, toEndpoint, toRouterId, toConnId, subject, _msgId, _replyId, contents, meta = values
         assert _toPy(schema) == '1'
-        msg = Msg(Addr(_toPy(toEndpointId), _toPy(toRouterId), _toPy(toConnId)), _toPy(subject), _toPy(contents))
-        msg.fromAddr = Addr(_toPy(fromEndpointId), _toPy(fromRouterId), _toPy(fromConnId))
+        msg = Msg(Addr(_toPy(toEndpoint), _toPy(toRouterId), _toPy(toConnId)), _toPy(subject), _toPy(contents))
+        msg.replyAddr = Addr(_toPy(replyEndpoint), _toPy(replyRouterId), _toPy(replyConnId))
         msg._msgId = _toPy(_msgId)
         msg._replyId = _toPy(_replyId)
         msg.meta = _toPy(meta)
@@ -812,7 +946,7 @@ def _tcpAddr(ip, port):
     else:
         return sys.intern(f'tcp://{ip}:{port}')
 
-class _AccumulatedMessages:
+class _MsgAccumulator:
     __slots__ = ('msgs', '_expiryTimeMs', '_maxQueue')
 
     def __init__(self, timeout, maxQueue=Missing):
