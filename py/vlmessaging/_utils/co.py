@@ -51,8 +51,8 @@ async def until(*awaitables, return_when=asyncio.ALL_COMPLETED, timeout=None):
         elif isinstance(awaitables[0], (dict_keys, dict_values)):
             things = list(awaitables[0])
     things = [taskOnEvent(thing) if isinstance(thing, asyncio.Event) else thing for thing in things]
-    secs = timeout / 1000.0 if timeout else None
-    if awaitables:
+    secs = timeout / 1000.0 if timeout is not None else None
+    if things:
         return await asyncio.wait(things, timeout=secs, return_when=return_when)
     elif timeout is not None:
         await asyncio.sleep(timeout / 1000.0)     # even if timeout == 0 yield at least once

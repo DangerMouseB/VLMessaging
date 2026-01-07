@@ -16,7 +16,7 @@ import asyncio
 from vlmessaging._utils.sentinels import Missing
 from vlmessaging._utils.utils import Timer
 from vlmessaging import _constants as VLM
-from vlmessaging._core import ExitMessageHandler, Msg
+from vlmessaging._core import ExitMessageHandler, Msg, Entry
 
 
 # work-in-progress utils
@@ -25,7 +25,7 @@ async def _waitForSingleEntryAddrOfTypeOrReplyAndExit(connection, entryType, tot
     t = Timer(totalTimeout)
     while not t:
         if entry := await _findSingleEntryAddrOfTypeOrMissing(connection, entryType, msgTimeout, errMsg): return entry
-        await asyncio.sleep(msgTimeout)
+        await asyncio.sleep(msgTimeout / 1000)
     await _replyAndExit(connection, errMsg)
 
 async def _findSingleEntryAddrOfTypeOrReplyAndExit(connection, entryType, timeout, errMsg):
@@ -40,7 +40,7 @@ async def _findSingleEntryAddrOfTypeOrMissing(connection, entryType, timeout, er
 async def _findEntriesOfTypeOrExit(connection, entryType, timeout, errMsg):
     res = await connection.send(Msg(connection.directoryAddr, VLM.GET_ENTRIES, entryType), timeout)
     if res is Missing: await _replyAndExit(connection, errMsg)
-    return res.contents
+    return [Entry.fromSeq(e) for e in res.contents]
 
 async def _replyAndExit(connection, errMsg):
     if errMsg: await connection.send(errMsg)

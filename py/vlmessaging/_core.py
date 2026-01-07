@@ -7,9 +7,8 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
-
 # Python imports
-import itertools, logging, pynng, asyncio, weakref, collections, io, os, random, sys, uuid, traceback
+import itertools, logging, pynng, asyncio, weakref, collections, io, os, random, sys, uuid, traceback, datetime, inspect
 from amazon.ion import simpleion
 
 # local imports
@@ -31,9 +30,9 @@ _STOP_DIALING_ME_AND_CLOSE = "STOP_DIALING_ME_AND_CLOSE"
 
 _ROUTER_REP = 0
 _DIRECTORY_REP = 1
-_FIRST_CONNECTION_ID = _DIRECTORY_REP + 1
+_GATEWAY_REP = 2
+_FIRST_CONNECTION_ID = 3
 _HUB_ROUTER_ID = 1
-_NET_ROUTER_ID = 2
 _MAX_IPC_LISTEN_ATTEMPTS = 1000
 _DEFAULT_HEARTBEAT_ENTRIES_INTERVAL = 10_000
 
@@ -45,6 +44,7 @@ _TIMER = 4
 _SHUTDOWN_TRIGGERED = 5
 _TASKLIST_CHANGED = 6
 _CONNECTION_ATTEMPT_TIMEOUT = 7
+_TIMERLIST_CHANGED = 8
 
 _eventPPNameById = {
     _MSG_ARRIVED: 'MSG_ARRIVED',
@@ -80,19 +80,34 @@ def Addr__str__(self):
     if self.mEp is None:
         return f'<{self.rEp}>'
     elif self.nEp is None:
-        splits = self.mEp.rsplit('_', 1)
+        splits = self.mEp.rsplit('/', 1)
         return f'<{splits[-1]}::{self.rEp}>'
     else:
-        splits = self.mEp.rsplit('_', 1)
+        splits = self.mEp.rsplit('/', 1)
         return f'<{self.nEp}::{splits[-1]}::{self.rEp}>'
+def Addr_fromSeq(t):
+    return Addr(t[0], t[1], t[2])
 Addr.__str__ = Addr__str__
+Addr.fromSeq = Addr_fromSeq
 
 
 # OPEN: add the connection's 'uuid'?
 Entry = collections.namedtuple('Entry', ('addr', 'service', 'params', 'vnets', 'perms'))
+def fromSeq(t):
+    return Entry(
+        Addr.fromSeq(t[0]),
+        t[1],
+        t[2],
+        t[3],
+        [Perm.fromSeq(p) for p in t[4]] if t[4] else None
+    )
+Entry.fromSeq = fromSeq
 
 
-Perm =  collections.namedtuple('Perm', ('domain', 'permId'))
+Perm = collections.namedtuple('Perm', ('domain', 'permId'))
+def Perm_fromSeq(t):
+    return Perm(t[0], t[1])
+Perm.fromSeq = Perm_fromSeq
 
 
 class Msg:
@@ -250,11 +265,20 @@ class Connection:
 
     @property
     def directoryAddr(self):
-        return self._router._directoryAddr
+        return Addr(None, None, _DIRECTORY_REP)
 
     async def shutdown(self):
         self._router.shutdown()
         await until(self._router.hasShutdown)
+
+    def mEpListen(self, ep, start=Missing, end=Missing):
+        return self._router.mEpListen(ep, start, end)
+
+    def nEpListen(self, ep, start=Missing, end=Missing):
+        return self._router.nEpListen(ep, start, end)
+
+    def scheduleFn(self, fn, after):
+        return self._router.scheduleFn(fn, after)
 
 
 
@@ -264,7 +288,6 @@ class Connection:
 
 class Router:
 
-    # OPEN: add mode so can raise error if MACHINE mode is trying to connect to nEp, etc
     __slots__ = (
         '_name',
         '_mode',
@@ -281,13 +304,14 @@ class Router:
         '_isShuttingDown',              # an Event signalling that the router is shutting down
         '_isShuttingDownTask',          # a task that waits for the isShuttingDown event that connections can use to timeout
         '_hasShutdown',                 # an Event signalling that the router has shutdown
-        '_scheduledCallbacksByFnId',
-        # _pipeByNEpAndMep                # for a definite single hop - if absent use the following (which result in multiple hop)
+        '_timerListChanged',            # an Event signalling that the timer list has a new first timer
+        '_timerFnsByTime',
+        '_nextTime',                    # the next time a callback is scheduled for
     )
 
     # PUBLIC API
 
-    def __init__(self, mode=VLM.MACHINE_MODE, name=Missing, options=Missing):
+    def __init__(self, mode=VLM.MACHINE_MODE, name=Missing):
         if mode not in (VLM.LOCAL_MODE, VLM.MACHINE_MODE, VLM.NETWORK_MODE):
             raise ValueError(f'Unknown router mode "{mode}".')
 
@@ -309,7 +333,9 @@ class Router:
         self._isShuttingDown = asyncio.Event()
         self._isShuttingDownTask = taskOnEvent(self._isShuttingDown)
         self._hasShutdown = asyncio.Event()
-        self._scheduledCallbacksByFnId = {}
+        self._timerListChanged = asyncio.Event()
+        self._timerFnsByTime = {}
+        self._nextTime = Missing
 
         if mode in (VLM.MACHINE_MODE, VLM.NETWORK_MODE):
             id1 = next(_mEpSeed)
@@ -321,10 +347,41 @@ class Router:
         if name is Missing: self._name = f'router_{self._mEps[0]}' if self._mEps else 'local'
 
         asyncio.create_task(self._mainLoop())
+        asyncio.create_task(self._timerLoop())
 
 
     def newConnection(self, fn=Missing):
         return self._newConnection(next(self._rEpSeed), fn)
+
+    def scheduleFn(self, fn, after):
+        assert inspect.iscoroutinefunction(fn)
+        if isinstance(after, datetime.timedelta):
+            t = datetime.datetime.now() + after
+        elif isinstance(after, (int, float)):
+            t = datetime.datetime.now() + datetime.timedelta(milliseconds=after)
+        self._timerFnsByTime.setdefault(t, []).append(fn)
+        if self._nextTime is Missing or t < self._nextTime:
+            self._nextTime = t
+            self._timerListChanged.set()
+
+    def unscheduleFn(self, fn):
+        for t, fns in dict(self._timerFnsByTime).items():
+            if fn in list(fns):
+                fns.remove(fn)
+            if not fns:
+                self._timerFnsByTime.pop(t)
+
+    def unscheduleFnAt(self, fn, at):
+        if fn in (fns:=self._timerFnsByTime.get(at, [])):
+            fns.remove(fn)
+            if not fns:
+                self._timerFnsByTime.pop(t)
+
+    def mEpListen(self, mEp, start=Missing, end=Missing):
+        return self._listen(mEp, start, end)
+
+    def nEpListen(self, nEp, start=Missing, end=Missing):
+        return self._listen(nEp, start, end)
 
     def shutdown(self):
         self._connectionByREp = {}
@@ -334,31 +391,8 @@ class Router:
     def hasShutdown(self):
         return self._hasShutdown
 
-    def scheduleCallback(self, fn, every=Missing, after=Missing):
-        # OPEN: move this to the routers main loop so can be cancelled cleanly on shutdown and make debugging easier
-        # OPEN: implement after
-        fnId = id(fn)
-        if fnId in self._scheduledCallbacksByFnId:
-            raise ProgrammerError(f'Callback function {fn} is already scheduled.')
-        async def callbackLoop():
-            try:
-                while not self._isShuttingDown.is_set():
-                    await until(timeout=every)
-                    fn()
-            except asyncio.CancelledError:
-                pass
-        task = asyncio.create_task(callbackLoop())
-        self._scheduledCallbacksByFnId[fnId] = task
 
-    def unscheduleCallback(self, fn):
-        if fnId := id(fn) in self._scheduledCallbacksByFnId:
-            self._scheduledCallbacksByFnId.pop(fnId).cancel()
-
-    def nEpListen(self, nEp, start=Missing, end=Missing):
-        return self._listen(nEp, start, end)
-
-    def mEpListen(self, mEp, start=Missing, end=Missing):
-        return self._listen(mEp, start, end)
+    # CONNECTION MANAGEMENT
 
     def _listen(self, ep, start=Missing, end=Missing):
         # OPEN: can rework this when we're ready to implement a connection manager
@@ -380,7 +414,7 @@ class Router:
             self._sbGateway = _NngSocketBundle(self, _EP_MACHINE)
             return self._sbRouter.mEpListen(ep, start if start else 1, start if start else 1)
         elif ep.startswith('ipc:///'):
-            # either a hub or gateway listen
+            # not a router, hub nor gateway listen
             raise NotYetImplemented('listen - ipc address must be /tmp/router_, /tmp/hub_ or /tmp/gateway_')
         elif ep.startswith('tcp://'):
             assert self._mode is VLM.NETWORK_MODE
@@ -389,9 +423,6 @@ class Router:
             end = end if end else start + 1
             return self._sbNetwork.nEpListen(ep, start, end)
 
-
-    # LOCAL CONNECTION MANAGEMENT
-
     def _newConnection(self, rEp, fn):
         c = Connection(self, Addr(None, self._mEps[0] if self._mEps else None, rEp), fn)
         assert rEp not in self._connectionByREp
@@ -399,10 +430,6 @@ class Router:
         self._inboxByREp[rEp] = Queue()
         self._taskListChanged.set()
         return c
-
-    @property
-    def _directoryAddr(self):
-        return Addr(None, None, _DIRECTORY_REP)
 
     def _dropInboxFor(self, rEp):
         self._inboxByREp.pop(rEp, None)
@@ -421,27 +448,6 @@ class Router:
                 reply._msgId = -1
                 _PPMsg(f'unroutable', msg._msgId)
                 self._route(reply)
-
-    def _checkMachineHubConnection(self):
-        # OPEN: implement
-        pass
-        # if _HUB_ROUTER_ID not in self._sbHub._pipesByEp:
-        #     if not self._sHubIn and self._canRunLocalHubDirectory:
-        #         # try to become the machine hub directory
-        #         try:
-        #             s = pynng.Pair1(polyamorous=True)
-        #             s.listen(_ipcUrl(_HUB_ROUTER_ID))
-        #             s.add_post_pipe_connect_cb(self._onHubInConnect)
-        #             s.add_post_pipe_remove_cb(self._onHubInDisconnect)
-        #             self._sHubIn = s
-        #         except pynng.exceptions.AddressInUse as ex:
-        #             pass
-        #     if not self._sHubIn and not self._sHubOut:
-        #         # we do not host the machine hub directory try to connect to it
-        #         _sHubOut = pynng.Pair1(polyamorous=True)
-        #         _sHubOut.add_post_pipe_connect_cb(self._sHubOutPostConnectCb)
-        #         _sHubOut.add_post_pipe_remove_cb(self._sHubOutPostRemoveCb)
-        #         _sHubOut.dial(_ipcUrl(_HUB_ROUTER_ID), block=False)
 
 
     # ROUTING
@@ -471,12 +477,11 @@ class Router:
             self._sbNetwork._nRoute(msg, nEp)
 
 
-
-    # MAIN LOOP
+    # EVENT LOOPS
 
     async def _mainLoop(self):
         # To prevent starvation we watch tasks fairly by moving a task that has just been processed to the bottom of the
-        # list thus silent tasks bubble to the top. This is mildly wasteful since silent tasks need to, presumably, be 
+        # list thus silent tasks bubble to the top. This is mildly wasteful since silent tasks need to, presumably, be
         # checked each loop, but it does ensure that busy tasks don't dominate less busy tasks.
         taskList = {
             self._isShuttingDownTask: _Details(_SHUTDOWN_TRIGGERED, None),
@@ -512,9 +517,9 @@ class Router:
                             if pipe.id not in (sb._epByPipeId, sb._ep):
                                 _PPMsg('main::SOCK_RECV', f'{self._name} received first message on channel {pipe.url}')
                                 otherEp = msg.contents
-                                if (pipeByPipeId := sb._pipesByEp.get(otherEp, Missing)) is Missing:
+                                if (pipeByPipeId := sb._pipeByPipeIdByEp.get(otherEp, Missing)) is Missing:
                                     _PPMsg('main::SOCK_RECV', f'{self._name} received otherEp {otherEp} for channel {pipe.url}')
-                                    pipeByPipeId = sb._pipesByEp[otherEp] = {}
+                                    pipeByPipeId = sb._pipeByPipeIdByEp[otherEp] = {}
                                 else:
                                     _PPMsg('main::SOCK_RECV', f'{self._name} - WARNING: already connected to {otherEp} - adding additional connection')
                                     sb._epsWithExcessPipes.add(otherEp)
@@ -528,11 +533,6 @@ class Router:
                     elif details.type == _CONNECTION_ATTEMPT_TIMEOUT:
                         # OPEN: cancel the dialer if it is still trying to connect, return unroutable messages to sender
                         raise NotYetImplemented('_CONNECTION_ATTEMPT_TIMEOUT')
-                        # _accumulatedMsgsByRouterId
-
-                    elif details.type == _TIMER:
-                        fnId = details.args
-                        raise NotYetImplemented('_TIMER')
 
                     elif details.type == _TASKLIST_CHANGED:
                         # remove old tasks that are no longer needed
@@ -567,11 +567,6 @@ class Router:
                             taskList[corecv(self._sbNetwork.sock)] = _Details(_SOCK_RECV, self._sbNetwork)
                             _PPMsg(f'main', f'{self._name} - added network SOCK_RECV task')
 
-
-                        # scheduled callbacks
-                        # for fnId, cb in self._scheduledCallbacksByFnId.items():
-                        #     if (_TIMER, fnId) not in taskList.values():
-
                         self._taskListChanged.clear()
                         taskList[taskOnEvent(self._taskListChanged)] = details              # add task to bottom of list
 
@@ -601,6 +596,58 @@ class Router:
         _PPMsg('shutdown', self._name)
 
 
+    async def _timerLoop(self):
+        taskList = {
+            self._isShuttingDownTask: _Details(_SHUTDOWN_TRIGGERED, None),
+            taskOnEvent(self._timerListChanged): _Details(_TIMERLIST_CHANGED, None),
+        }
+        running = True
+        pending = []
+        while running:
+            self._nextTime = Missing
+            for t, fns in self._timerFnsByTime.items():
+                if self._nextTime is Missing or t < self._nextTime:
+                    self._nextTime = t
+
+            if self._nextTime:
+                if (now := datetime.datetime.now()) < self._nextTime:
+                    ms = (self._nextTime - now).total_seconds() * 1000
+                    done, pending = await until(taskList.keys(), return_when=asyncio.FIRST_COMPLETED, timeout=ms)
+                else:
+                    # timer already expired, but check for shutdown etc before executing fn
+                    done, pending = await until(taskList.keys(), return_when=asyncio.FIRST_COMPLETED, timeout=0)
+            else:
+                # no timers, wait indefinitely until a fn is scheduled
+                done, pending = await until(taskList.keys(), return_when=asyncio.FIRST_COMPLETED, timeout=None)
+
+            for task in done:
+                details = taskList.pop(task)                                    # remove task from the list
+                if details.type == _TIMERLIST_CHANGED:
+                    self._timerListChanged.clear()
+                    taskList[taskOnEvent(self._timerListChanged)] = details     # add task to bottom of list
+                elif details.type == _SHUTDOWN_TRIGGERED:
+                    running = False
+                    break
+                else:
+                    raise ProgrammerError(f'Unknown monitor type "{details.type}".')
+
+            if running and self._nextTime and datetime.datetime.now() >= self._nextTime:
+                fns = self._timerFnsByTime.pop(self._nextTime, [])
+                for fn in fns:
+                    try:
+                        await fn()
+                    except Exception as ex:
+                        _PPMsg('!!!!', f'Error executing scheduled timer function in router {self._name}: {ex}')
+
+        for t in pending:
+            t.cancel()
+            await until(timeout=0)
+        for t in taskList.keys():
+            t.cancel()
+            await until(timeout=0)
+        _PPMsg('timerloop shutdown', self._name)
+
+
     # DISPLAY
 
     def __str__(self):
@@ -614,7 +661,7 @@ class _NngSocketBundle:
         '_epType',
         '_ep',
         'sock',
-        '_pipesByEp',               # pipe by pipeId by ep - so we know which pipe to send a msg down
+        '_pipeByPipeIdByEp',        # pipe by pipeId by ep - so we know which pipe to send a msg down
         '_epByPipeId',              # so we know which remote thing a msg has directly come from
         '_epsWithExcessPipes',
         '_dialerByEp',              # so we can cancel dialing if we need to
@@ -631,7 +678,7 @@ class _NngSocketBundle:
         self.sock = pynng.Pair1(polyamorous=True)
         self.sock.add_post_pipe_connect_cb(self._onConnect)
         self.sock.add_post_pipe_remove_cb(self._onDisconnect)
-        self._pipesByEp = {}
+        self._pipeByPipeIdByEp = {}
         self._epByPipeId = {}
         self._epsWithExcessPipes = set()
         self._dialerByEp = {}
@@ -658,13 +705,14 @@ class _NngSocketBundle:
         return ep
 
     def _listen(self, template, id1, id2):
-        assert id1 < id2
+        assert id1 <= id2
         while id1 <= id2:
             sockAddr = template.format(N=id1)
             if sockAddr not in _addressesInUse:
                 listener = Missing
                 try:
                     listener = self.sock.listen(sockAddr)
+                    self._ep = sockAddr
                     _PPMsg('listening', f'{self._router._name or str(self._ep)} - {self._ep}')
                     break
                 except pynng.exceptions.AddressInUse as ex:
@@ -675,13 +723,12 @@ class _NngSocketBundle:
                 id1 += 1
         if id1 > id2:
             raise RuntimeError(f'Unable to find a free address.')
-        self._ep = sockAddr
         _addressesInUse.add(sockAddr)
         self._router._taskListChanged.set()
         return self._ep
 
     def _dial(self, ep, timeout):
-        assert ep not in self._msgAccumulatorByEp
+        if ep in self._msgAccumulatorByEp: raise ValueError(f'Already dialing {ep}.')
         msgAccumulator = self._msgAccumulatorByEp[ep] = _MsgAccumulator(monotonicTimeMs() + timeout)
         self._dialerByEp[ep] = dial(self.sock, ep, block=False)
         _PPMsg('dialing_router', f'{self._router._name} dialing {ep}')
@@ -722,7 +769,9 @@ class _NngSocketBundle:
         localNEpRandomPort = f'tcp://{pipe.local_address}'
         ep = f'tcp://{pipe.remote_address}'
         _PPMsg('onConnectTcpOut', f'{self._router._name} - connected to {ep} from {localNEpRandomPort}')
-        self._pipesByEp[ep] = pipe
+        if (pipeByPipeId := self._pipeByPipeIdByEp.get(ep, Missing)) is Missing:
+            pipeByPipeId = self._pipeByPipeIdByEp[ep] = {}
+        if pipe.id not in pipeByPipeId: pipeByPipeId[pipe.id] = pipe
         # tell the other end who we are if we are listening on a known network ep else don't tell them anything
         if self._ep:
             msg = Msg(Addr(None, None, _ROUTER_REP), _SET_ROUTE_BACK_TO_ME, self._ep)
@@ -741,9 +790,9 @@ class _NngSocketBundle:
         # we know who we are connecting to since we dialed them so send our id right away
         ep = pipe.url
         _PPMsg('onConnectIpcOut', f'{self._router._name} - connected to {ep}')
-        if (pipeByPipeId := self._pipesByEp.get(ep, Missing)) is Missing:
-            pipeByPipeId = self._pipesByEp[ep] = {}
-        if ep not in pipeByPipeId: pipeByPipeId[pipe.id] = ep
+        if (pipeByPipeId := self._pipeByPipeIdByEp.get(ep, Missing)) is Missing:
+            pipeByPipeId = self._pipeByPipeIdByEp[ep] = {}
+        if pipe.id not in pipeByPipeId: pipeByPipeId[pipe.id] = pipe
         msg = Msg(Addr(None, None, _ROUTER_REP), subject=_SET_ROUTE_BACK_TO_ME, contents=self._ep)
         msg.replyAddr = Addr(None, None, None)
         send(pipe, _msgAsBytes(msg), block=False)
@@ -756,7 +805,7 @@ class _NngSocketBundle:
         try:
             remoteId = self._epByPipeId.pop(pipe.id, Missing)
             if remoteId:
-                if (pipeByPipeId := self._pipesByEp.get(remoteId, Missing)) is not Missing:
+                if (pipeByPipeId := self._pipeByPipeIdByEp.get(remoteId, Missing)) is not Missing:
                     pipeByPipeId.pop(pipe.id, None)
                 _PPMsg('onDisconnect', f'{self._router._name} <{remoteId}> - {pipeConnectionType(pipe)} on channel <{pipe.url}>')
             else:
@@ -768,7 +817,7 @@ class _NngSocketBundle:
     # ROUTING
 
     def _mRoute(self, msg, ep):
-        if (pipeByPipeId := self._pipesByEp.get(ep, Missing)) is Missing:
+        if (pipeByPipeId := self._pipeByPipeIdByEp.get(ep, Missing)) is Missing:
             if (msgAccumulator := self._msgAccumulatorByEp.get(ep, Missing)) is Missing:
                 msgAccumulator = self._dial(ep, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
             msgAccumulator.queueMsg(msg)
@@ -779,7 +828,7 @@ class _NngSocketBundle:
             cosend(pipe, _msgAsBytes(msg))  # we might be able to async send this instead but not sure we gain much
 
     def _nRoute(self, msg, ep):
-        if (pipeByPipeId := self._pipesByEp.get(ep, Missing)) is Missing:
+        if (pipeByPipeId := self._pipeByPipeIdByEp.get(ep, Missing)) is Missing:
             if (msgAccumulator := self._msgAccumulatorByEp.get(ep, Missing)) is Missing:
                 msgAccumulator = self._dial(ep, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
             msgAccumulator.queueMsg(msg)
@@ -801,39 +850,127 @@ class _NngSocketBundle:
 # **********************************************************************************************************************
 
 class Directory:
+    _conn: Connection
     # OPEN: add security so agents can only add / remove their own entries and see only what they are allowed to see,
     #       but what about telling a directory that a connection didn't get delivered
+    
+    _SHARE_ENTRIES = 'SHARE_ENTRIES'
+    _BAD_ENTRIES = 'BAD_ENTRIES'
+    _GET_VNETS = 'GET_VNETS'
+    
     __slots__ = (
+        '_routerName',
         '_conn',
-        '_peers',                   # addr
         '_entries',                 # [Entry]
         '_potentiallyStale',        # set() of addr we haven't heard from in a while
-        '_heartbeatEntriesInterval',
+        '_heartbeatEntriesTimeout',
+        '_vnets',                   # list of vnet names
+        '_hubListen',               # mEp or Missing
+        '_hubListener',             # listener object or Missing
+        '_hubs',                    # list of mEp
+        '_gatewayListen',           # mEp or Missing
+        '_gatewayListener',         # listener object or Missing
+        '_gateways',                # list of mEp
+        '_netListen',               # nEp or Missing
+        '_netListener',             # listener object or Missing
+        '_netHubs',                 # list of nEp
+        '_beaconAnnounce',          # UDP multicast address or Missing
+        '_beaconListen',            # UDP multicast address or Missing
+        '_ensureNetworkWait',       # time to wait before trying to ensure network again
+        '_vnetByHub',               # vnet name by hub mEp or hub nEp
     )
 
     def __init__(self,
             router,
-            vnets=Missing,          # list
-            hubListen=Missing,      # mEp or Missing
-            hubs=Missing,           # list of mEp
-            gatewayListen=Missing,  # mEp
-            gateways=Missing,       # list of mEp
-            netListen=Missing,      # nEp or Missing
-            netHubs=Missing,        # list of nEp
-            beaconAnnounce=Missing, # beacon address to announce myself on
-            beaconListen=Missing,   # address to listen for beacons on
-            autoDrop=True,
-            heartbeatEntriesTimeout=10000,
+            vnets=Missing,              # list
+            hubListen=Missing,          # mEp or Missing
+            hubs=Missing,               # list of mEp
+            gatewayListen=Missing,      # mEp
+            gateways=Missing,           # list of mEp
+            netListen=Missing,          # nEp or Missing
+            netHubs=Missing,            # list of nEp
+            beaconAnnounce=Missing,     # beacon address to announce myself on
+            beaconListen=Missing,       # address to listen for beacons on
+            heartbeatEntriesTimeout=Missing,
     ):
 
         if router._connectionByREp.get(_DIRECTORY_REP, Missing) is not Missing:
             raise RuntimeError('A Directory already exists on this router')
+        self._routerName = router._name
         self._conn = router._newConnection(_DIRECTORY_REP, self.msgArrived)
-        self._heartbeatEntriesInterval = _DEFAULT_HEARTBEAT_ENTRIES_INTERVAL if heartbeatEntriesTimeout is Missing else heartbeatEntriesTimeout
-        if autoDrop:
-            router.scheduleCallback(self._heartbeatEntries, every=self._heartbeatEntriesInterval)
+        self._heartbeatEntriesTimeout = \
+            _DEFAULT_HEARTBEAT_ENTRIES_INTERVAL \
+            if heartbeatEntriesTimeout is Missing \
+            else (Missing if heartbeatEntriesTimeout <= 0 else heartbeatEntriesTimeout)
         self._entries = []
         self._potentiallyStale = set()
+        self._vnets = [] if vnets is Missing else vnets
+        self._hubListen = hubListen
+        self._hubListener = Missing
+        self._hubs = [] if hubs is Missing else hubs
+        self._vnetByHub = {}
+        self._gatewayListen = gatewayListen
+        self._gatewayListener = Missing
+        self._gateways = [] if gateways is Missing else gateways
+        self._netListen = netListen
+        self._netListener = Missing
+        self._netHubs = [] if netHubs is Missing else netHubs
+        self._ensureNetworkWait = 50
+        self._conn.scheduleFn(self._ensureNetwork, after=self._ensureNetworkWait)
+        if self._heartbeatEntriesTimeout:
+            self._conn.scheduleFn(self._heartbeatEntries, after=self._heartbeatEntriesTimeout)
+
+
+    async def _ensureNetwork(self):
+        try:
+            await self._ensureNetworkImpl()
+        except Exception as ex:
+            _PPMsg('d:ensureNetwork', f'{self._routerName}: Error ensuring network: {repr(ex)}')
+            await self._ensureNetworkImpl()
+            raise
+        finally:
+            # schedule next ensure network attempt
+            self._ensureNetworkWait = max(min(self._ensureNetworkWait * 2, 10000), 50)
+            self._conn.scheduleFn(self._ensureNetwork, after=self._ensureNetworkWait)
+
+    async def _ensureNetworkImpl(self):
+
+        # try to listen as a machine hub (if specified)
+        if self._hubListen and not self._hubListener:
+            try:
+                self._hubListener = self._conn.mEpListen(self._hubListen)
+            except Exception as ex:
+                _PPMsg('d:ensureNetwork', f'{self._routerName}: Another router is already listening on {self._hubListen} - {repr(ex)}')
+                
+        # share entries with machine hubs
+        for hub in self._hubs:
+            if hub != self._hubListen:
+                entriesToShare = [e for e in self._entries if VLM.LOCAL_VNET in e.vnets]
+                await self._conn.send(Msg(Addr(None, hub, _DIRECTORY_REP), Directory._SHARE_ENTRIES, entriesToShare))
+
+        # try to listen as a gateway (if specified)
+        if self._gatewayListen and not self._gatewayListener:
+            try:
+                self._gatewayListener = self._conn.mEpListen(self._gatewayListen)
+            except Exception as ex:
+                _PPMsg('d:ensureNetwork', f'{self._routerName}: Another router is already listening on {self._gatewayListen} - {repr(ex)}')
+
+        # network hubs
+        if self._netListen and not self._netListener:
+            try:
+                self._netListener = self._conn.nEpListen(self._netListen)
+            except Exception as ex:
+                _PPMsg('d:ensureNetwork', f'{self._routerName}: Another router is already listening on {self._netListen} - {repr(ex)}')
+
+        # share entries with network hubs
+        for hub in self._netHubs:
+            if hub != self._netListen:
+                if vnets := self._vnetByHub.get(hub, Missing) is Missing:
+                    await self._conn.send( Msg(Addr(hub, None, _DIRECTORY_REP), Directory._GET_VNETS) )
+                else:
+                    # share my entries with net hub
+                    entriesToShare = [e for e in self._entries if _anyIn(e.vnets, vnets)]
+                    await self._conn.send(Msg(Addr(hub, None, _DIRECTORY_REP), Directory._SHARE_ENTRIES, entriesToShare))
 
 
     async def msgArrived(self, msg):
@@ -846,16 +983,22 @@ class Directory:
                     await self._conn.send( msg.reply(True) )
                     return
             self._entries.append( msg.contents )
+            self._conn._router.unscheduleFn(self._ensureNetwork)
+            self._conn._router.scheduleFn(self._ensureNetwork, after=200)
             await self._conn.send(msg.reply(True))
 
         elif msg.subject == VLM.UNREGISTER_ENTRY:
             entry = msg.contents
             self._entries = [e for e in self._entries if e != entry]
+            self._conn._router.unscheduleFn(self._ensureNetwork)
+            self._conn._router.scheduleFn(self._ensureNetwork, after=200)
             await self._conn.send(msg.reply(True))
 
         elif msg.subject == VLM.UNREGISTER_ADDR:
             addr = msg.contents
             self._entries = [e for e in self._entries if e.addr != addr]
+            self._conn._router.unscheduleFn(self._ensureNetwork)
+            self._conn._router.scheduleFn(self._ensureNetwork, after=200)
             await self._conn.send(msg.reply(True))
 
         elif msg.subject == VLM.GET_ENTRIES:
@@ -864,10 +1007,45 @@ class Directory:
             else:
                 await self._conn.send(msg.reply(self._entries))
 
+        elif msg.subject == Directory._GET_VNETS:
+            if msg.isReply:
+                self._vnetByHub[msg.replyAddr.nEp] = msg.contents
+            else:
+                await self._conn.send(msg.reply(self._vnets))
+
+        elif msg.subject == Directory._BAD_ENTRIES:
+            _PPMsg(f'd:{msg.subject}', f'{self._routerName} - I was told I send bad entries!!')
+        
+        elif msg.subject == Directory._SHARE_ENTRIES:
+            _PPMsg(f'd:{msg.subject}', f'{self._routerName} received {len(msg.contents)} entries to share')
+            entries = []
+            for seq in msg.contents:
+                try:
+                    _PPMsg(f'd:{msg.subject}', f'{self._routerName} processing shared entry: {seq}')
+                    entries.append(Entry.fromSeq(seq))
+                except Exception as ex:
+                    _PPMsg(f'd:{msg.subject}', f'{self._routerName} - invalid entry received: {repr(ex)}')
+                    reply = Msg(msg.replyAddr, Directory._BAD_ENTRIES, None)
+                    await self._conn.send(reply)
+                    return
+            for entry in entries:
+                for e in self._entries:
+                    if e.addr == entry.addr and e.service == entry.service and e.params == entry.params:
+                        break
+                else:
+                    self._entries.append(entry)
+            if not msg.isReply:
+                if msg.replyAddr.nEp:
+                    entries = [e for e in self._entries if _anyIn(e.vnets, self._vnets)]
+                else:
+                    entries = [e for e in self._entries if VLM.LOCAL_VNET in e.vnets]
+                await self._conn.send(msg.reply(entries))
+
         else:
             return [VLM.HANDLE_PING, VLM.HANDLE_DOES_NOT_UNDERSTAND]
 
-    def _heartbeatEntries(self):
+
+    async def _heartbeatEntries(self):
         self._entries = [entry for entry in self._entries if entry.addr not in self._potentiallyStale]
         self._potentiallyStale = set([entry.addr for entry in self._entries])
         for addr in self._potentiallyStale:
@@ -960,3 +1138,9 @@ class _MsgAccumulator:
     @property
     def hasExpired(self):
         return self._expiryTimeMs < monotonicTimeMs() or (self._maxQueue and len(self.msgs) > self._maxQueue)
+
+def _anyIn(As, Bs):
+    for a in As:
+        if a in Bs:
+            return True
+    return False

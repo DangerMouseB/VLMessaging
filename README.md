@@ -88,10 +88,11 @@ Act as requester
 
 ## EXAMPLES ##
 
-### Add One Via IPC Example ###
+### Add One Via IPC ###
 
 ```python
-from vlmessaging import Msg, Router, VLM, utils
+from vlmessaging import Msg, Router, VLM
+from vlmessaging.utils import co
 
 
 class AddOneAgent:
@@ -102,9 +103,9 @@ class AddOneAgent:
         if msg.subject == 'ADD_ONE':
             await self.conn.send(msg.reply(msg.contents + 1))
         else:
-            raise NotImplementedError()
+            raise ValueError(f'Unhandled subject: {msg.subject}')
 
-async def run_add_one_test():
+async def run_example():
     router1 = Router(mode=VLM.MACHINE_MODE)
     router2 = Router(mode=VLM.MACHINE_MODE)
     fred = AddOneAgent(router1)
@@ -115,7 +116,67 @@ async def run_add_one_test():
 
     router1.shutdown()
     router2.shutdown()
-    await utils.until((router1.hasShutdown, router2.hasShutdown))
+    await co.until((router1.hasShutdown, router2.hasShutdown))
 
-utils.startEventLoopWith(run_add_one_test)
+co.startEventLoopWith(run_example)
+```
+
+### Add One Via IPC and Resource Discovery ###
+
+```python
+from vlmessaging import Msg, Router, VLM, Entry, Directory
+from vlmessaging.utils import co, Missing, wip
+
+
+class AddOneAgent:
+  
+    def __init__(self, router):
+        self.conn = router.newConnection(self.msgArrived)
+
+    async def start(self, vnet=[]):
+        msg = Msg(
+            self.conn.directoryAddr,
+            VLM.REGISTER_ENTRY,
+            Entry(
+                self.conn.addr,
+                'AddOneAgent',
+                params=None,
+                vnets=[vnet] if not isinstance(vnet, (list, tuple)) else None,
+                perms=None
+            )
+        )
+        await self.conn.send(msg, 500)
+        return self
+
+    async def msgArrived(self, msg):
+        if msg.subject == 'ADD_ONE':
+            await self.conn.send(msg.reply(msg.contents + 1))
+        else:
+            return [VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_PING, VLM.HANDLE_DOES_NOT_UNDERSTAND]
+        
+        
+async def run_example():
+    r1 = Router(mode=VLM.MACHINE_MODE)
+    d1 = Directory(r1,
+        hubListen='ipc:///tmp/hub_1',
+    )
+
+    r2 = Router(mode=VLM.MACHINE_MODE)
+    d2 = Directory(r2,
+        hubs=['ipc:///tmp/hub_1'],
+    )
+
+    agent = await AddOneAgent(r1).start(VLM.LOCAL_VNET)
+
+    conn = r2.newConnection()
+    # loop until timeout or the relevant entry appears in d2 (propagated from d1)
+    agentAddr = await wip._waitForSingleEntryAddrOfTypeOrReplyAndExit(conn, 'AddOneAgent', 2_000, 200, errMsg=Missing)
+    reply = await conn.send(Msg(agentAddr, 'ADD_ONE', 41), 2_000)
+    assert reply.contents == 42
+
+    r1.shutdown()
+    r2.shutdown()
+    await co.until([r1.hasShutdown, r2.hasShutdown])
+
+co.startEventLoopWith(run_example)
 ```

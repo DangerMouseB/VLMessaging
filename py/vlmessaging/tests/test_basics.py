@@ -39,13 +39,19 @@ class AddOneAgent:
     def __init__(self, router):
         self.conn = router.newConnection(self.msgArrived)
 
-    async def start(self):
+    async def start(self, vnet=[]):
         msg = Msg(
             self.conn.directoryAddr,
             VLM.REGISTER_ENTRY,
-            Entry(self.conn.addr, AddOneAgent.ENTRY_TYPE, None, None, None)
+            Entry(
+                self.conn.addr,
+                AddOneAgent.ENTRY_TYPE,
+                params=None,
+                vnets=[vnet] if not isinstance(vnet, (list, tuple)) else None,
+                perms=None
+            )
         )
-        reply = await self.conn.send(msg, 100)
+        reply = await self.conn.send(msg, 500)
         if reply is Missing:
             print('No directory')
         return self
@@ -55,7 +61,7 @@ class AddOneAgent:
         if msg.subject == AddOneAgent.ADD_ONE:
             await self.conn.send(msg.reply(msg.contents + 1))
         else:
-            return [VLM.IGNORE_UNHANDLED_REPLIES]
+            return [VLM.IGNORE_UNHANDLED_REPLIES, VLM.HANDLE_PING, VLM.HANDLE_DOES_NOT_UNDERSTAND]
 
 
 def test_router_local():
@@ -166,27 +172,21 @@ def test_directory_ipc():
         r1 = Router(mode=VLM.MACHINE_MODE, name='fred')
         d1 = Directory(r1,
             hubListen='ipc:///tmp/hub_1',
+            heartbeatEntriesTimeout=0,
         )
 
         r2 = Router(mode=VLM.MACHINE_MODE, name='joe')
         d2 = Directory(r2,
-            hubs=['ipc:///tmp/hub_1']
+            hubs=['ipc:///tmp/hub_1'],
+            heartbeatEntriesTimeout=0,
         )
 
-        agent = await AddOneAgent(r1).start()
-        msg = Msg(
-            agent.conn.directoryAddr,
-            VLM.REGISTER_ENTRY,
-            Entry(agent.conn.addr, AddOneAgent.ENTRY_TYPE, None, None, None)
-        )
-        reply = agent.conn.send(msg, 1_000)
-        assert reply
+        agent = await AddOneAgent(r1).start(VLM.LOCAL_VNET)
 
         conn = r2.newConnection()
         # loop until timeout or the relevant entry appears in d2 (propagated from d1)
-        raise NotYetImplemented('Directories need to ping each other to propagate entries')
-        agentAddr = await wip._waitForSingleEntryAddrOfTypeOrReplyAndExit(conn, AddOneAgent.ENTRY_TYPE, 5_000, 200, errMsg=Missing)
-        reply = await conn.send(Msg(agentAddr, 'ADD_ONE', 41), 1_000)
+        agentAddr = await wip._waitForSingleEntryAddrOfTypeOrReplyAndExit(conn, AddOneAgent.ENTRY_TYPE, 2_000, 200, errMsg=Missing)
+        reply = await conn.send(Msg(agentAddr, 'ADD_ONE', 41), 2_000)
         assert reply.contents == 42
 
         r1.shutdown()
@@ -203,26 +203,21 @@ def test_directory_tcp():
         d1 = Directory(r1,
             vnets=['test'],
             netListen='tcp://127.0.0.1:30001',
+            heartbeatEntriesTimeout=0,
         )
 
         r2 = Router(mode=VLM.MACHINE_MODE, name='joe')
         d2 = Directory(r2,
             vnets=['test'],
-            netHubs=['tcp://127.0.0.1:30001']
+            netHubs=['tcp://127.0.0.1:30001'],
+            heartbeatEntriesTimeout=0,
         )
 
-        agent = await AddOneAgent(r1).start()
-        msg = Msg(
-            agent.conn.directoryAddr,
-            VLM.REGISTER_ENTRY,
-            Entry(agent.conn.addr, AddOneAgent.ENTRY_TYPE, None, None, None)
-        )
-        reply = agent.conn.send(msg, 1_000)
-        assert reply
+        agent = await AddOneAgent(r1).start('test')
 
         conn = r2.newConnection()
         # loop until timeout or the relevant entry appears in d2 (propagated from d1)
-        agentAddr = await wip._waitForSingleEntryAddrOfTypeOrReplyAndExit(conn, AddOneAgent.ENTRY_TYPE, 5_000, 200, errMsg=Missing)
+        agentAddr = await wip._waitForSingleEntryAddrOfTypeOrReplyAndExit(conn, AddOneAgent.ENTRY_TYPE, 2_000, 200, errMsg=Missing)
         reply = await conn.send(Msg(agentAddr, 'ADD_ONE', 41), 1_000)
         assert reply.contents == 42
 
@@ -259,13 +254,6 @@ def test_directory_tcp_with_beacon_and_gateway():
         )
 
         agent = await AddOneAgent(r1).start()
-        msg = Msg(
-            agent.conn.directoryAddr,
-            VLM.REGISTER_ENTRY,
-            Entry(agent.conn.addr, AddOneAgent.ENTRY_TYPE, None, ['test'], None)
-        )
-        reply = agent.conn.send(msg, 1_000)
-        assert reply
 
         conn = r3.newConnection()
         # loop until timeout or the relevant entry appears in d3 (propagated from d1)
@@ -312,8 +300,8 @@ def main():
     test_reduce_connections_to_one()
     test_directory_local()
     test_directory_ipc()
-    test_directory_tcp()
-    test_directory_tcp_with_beacon_and_gateway()
+    # test_directory_tcp()
+    # test_directory_tcp_with_beacon_and_gateway()
     print('passed')
 
 
