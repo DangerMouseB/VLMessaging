@@ -77,14 +77,18 @@ Addr = collections.namedtuple('Addr', (
     'rEp'       # router level endpoint - e.g. 1, 2, 3
 ))
 def Addr__str__(self):
-    if self.mEp is None:
-        return f'<{self.rEp}>'
-    elif self.nEp is None:
-        splits = self.mEp.rsplit('/', 1)
-        return f'<{splits[-1]}::{self.rEp}>'
+    if self.nEp is not None:
+        if self.mEp is not None:
+            splits = self.mEp.rsplit('/', 1)
+            return f'<{self.nEp}::{splits[-1]}::{self.rEp}>'
+        else:
+            return f'<{self.nEp}::None::{self.rEp}>'
     else:
-        splits = self.mEp.rsplit('/', 1)
-        return f'<{self.nEp}::{splits[-1]}::{self.rEp}>'
+        if self.mEp is not None:
+            splits = self.mEp.rsplit('/', 1)
+            return f'<{splits[-1]}::{self.rEp}>'
+        else:
+            return f'<{self.rEp}>'
 def Addr_fromSeq(t):
     return Addr(t[0], t[1], t[2])
 Addr.__str__ = Addr__str__
@@ -132,12 +136,21 @@ class Msg:
     def isReply(self):
         return self._replyId is not None
 
+    def clone(self):
+        clone = Msg(self.toAddr, self.subject, self.contents)
+        clone.replyAddr = self.replyAddr
+        clone._msgId = self._msgId
+        clone._replyId = self._replyId
+        clone.meta = dict(self.meta)
+        return clone
+
     def __repr__(self):
         if self._replyId is None:
-            return f'Msg({self.replyAddr!s} -> {self.toAddr!s} "{self.subject!s}" msgId: {self._msgId})'
+            return f'Msg({self.replyAddr!s} => {self.toAddr!s}, subject: "{self.subject!s}", msgId: {self._msgId})'
         else:
-            return f'Msg({self.replyAddr!s} -> {self.toAddr!s} "{self.subject!s}" REPLY msgId: {self._msgId}, replyId: {self._replyId})'
+            return f'Msg({self.replyAddr!s} => {self.toAddr!s}, subject: "{self.subject!s}" REPLY, msgId: {self._msgId}, replyId: {self._replyId})'
 
+LocalRemoteEps = collections.namedtuple('LocalRemoteEps', ('local', 'remote'))
 
 
 # **********************************************************************************************************************
@@ -159,7 +172,14 @@ class Connection:
     async def send(self, msg, timeout=Missing, additional_subjects=Missing):
         # return reply, Missing if timeout exceeded or None if no timeout
         msg._msgId = next(self._msgIdSeed)
-        msg.replyAddr = self.addr
+        if not msg.replyAddr:
+            if msg.toAddr.nEp is None:
+                if msg.toAddr.mEp is None:
+                    msg.replyAddr = Addr(None, None, self.addr.rEp)
+                else:
+                    msg.replyAddr = Addr(None, self.addr.mEp, self.addr.rEp)
+            else:
+                msg.replyAddr = self.addr
         if timeout:
             # semi-sync send - wait for reply or timeout
             loop = asyncio.get_running_loop()
@@ -339,7 +359,7 @@ class Router:
 
         if mode in (VLM.MACHINE_MODE, VLM.NETWORK_MODE):
             id1 = next(_mEpSeed)
-            self.nEpListen('ipc:///tmp/router_{N}', id1, id1 + _MAX_IPC_LISTEN_ATTEMPTS)
+            self.mEpListen('ipc:///tmp/router_{N}', id1, id1 + _MAX_IPC_LISTEN_ATTEMPTS)
 
         if mode is VLM.NETWORK_MODE:
             self._sbNetwork = _NngSocketBundle(self, _EP_NETWORK)
@@ -514,7 +534,7 @@ class Router:
                         pipe = incoming.pipe
                         msg = _msgFromBytes(incoming.bytes)
                         if msg.subject == _SET_ROUTE_BACK_TO_ME:
-                            if pipe.id not in (sb._epByPipeId, sb._ep):
+                            if pipe.id not in sb._localRemoteEpsByPipeId:
                                 _PPMsg('main::SOCK_RECV', f'{self._name} received first message on channel {pipe.url}')
                                 otherEp = msg.contents
                                 if (pipeByPipeId := sb._pipeByPipeIdByEp.get(otherEp, Missing)) is Missing:
@@ -523,10 +543,25 @@ class Router:
                                 else:
                                     _PPMsg('main::SOCK_RECV', f'{self._name} - WARNING: already connected to {otherEp} - adding additional connection')
                                     sb._epsWithExcessPipes.add(otherEp)
-                                sb._epByPipeId[pipe.id] = otherEp
-                                pipeByPipeId[pipe.id] = pipe
+                                # overwrite any previous mapping for this pipe.id
+                                sb._localRemoteEpsByPipeId[pipe.id] = LocalRemoteEps(
+                                    msg.toAddr.nEp if sb._epType == _EP_NETWORK else msg.toAddr.mEp, 
+                                    otherEp
+                                )
+                                sb._pipeByPipeIdByEp[otherEp]  = {pipe.id:pipe} | pipeByPipeId  # make this explicit one the first in the dict
+
                         else:
                             _PPMsg('main::SOCK_RECV', f'{self._name} - routing {msg}')
+                            if sb._epType == _EP_NETWORK:
+                                if msg.replyAddr.nEp is None:
+                                    # assign the repyAddr.nEp to the random port one
+                                    msg.replyAddr = Addr(
+                                        sb._localRemoteEpsByPipeId[pipe.id].local,
+                                        msg.replyAddr.mEp,
+                                        msg.replyAddr.rEp
+                                    )
+                                if msg.toAddr.nEp not in self._nEps:
+                                    _PPMsg('main::SOCK_RECV', f'{self._name} - ERROR')
                             self._route(msg)
                         taskList[corecv(sb.sock)] = details                                 # add task to bottom of list
 
@@ -662,7 +697,7 @@ class _NngSocketBundle:
         '_ep',
         'sock',
         '_pipeByPipeIdByEp',        # pipe by pipeId by ep - so we know which pipe to send a msg down
-        '_epByPipeId',              # so we know which remote thing a msg has directly come from
+        '_localRemoteEpsByPipeId',              # so we know which remote thing a msg has directly come from
         '_epsWithExcessPipes',
         '_dialerByEp',              # so we can cancel dialing if we need to
         '_msgAccumulatorByEp',      # to be checked periodically for connection, reply with unroutable on time out
@@ -679,7 +714,7 @@ class _NngSocketBundle:
         self.sock.add_post_pipe_connect_cb(self._onConnect)
         self.sock.add_post_pipe_remove_cb(self._onDisconnect)
         self._pipeByPipeIdByEp = {}
-        self._epByPipeId = {}
+        self._localRemoteEpsByPipeId = {}
         self._epsWithExcessPipes = set()
         self._dialerByEp = {}
         self._msgAccumulatorByEp = {}
@@ -759,29 +794,6 @@ class _NngSocketBundle:
         except Exception as ex:
             _PPMsg('onConnect', f'#err {self._router._name} - {direction} via {pipe.url} - {repr(ex)}')
 
-    def _onIncomingTcpConnect(self, pipe):
-        # for a tcp connection we only know the dialer's randomly assigned outgoing address, so we can't set up any
-        # routing unless they send a message identifying themselves as a reply network ep
-        ep = f'tcp://{pipe.remote_address}'
-        _PPMsg('onConnectTcpIn', f'{self._router._name} - incoming from randomly assigned {ep}')
-
-    def _onOutGoingTcpConnect(self, pipe):
-        localNEpRandomPort = f'tcp://{pipe.local_address}'
-        ep = f'tcp://{pipe.remote_address}'
-        _PPMsg('onConnectTcpOut', f'{self._router._name} - connected to {ep} from {localNEpRandomPort}')
-        if (pipeByPipeId := self._pipeByPipeIdByEp.get(ep, Missing)) is Missing:
-            pipeByPipeId = self._pipeByPipeIdByEp[ep] = {}
-        if pipe.id not in pipeByPipeId: pipeByPipeId[pipe.id] = pipe
-        # tell the other end who we are if we are listening on a known network ep else don't tell them anything
-        if self._ep:
-            msg = Msg(Addr(None, None, _ROUTER_REP), _SET_ROUTE_BACK_TO_ME, self._ep)
-            msg.replyAddr = Addr(None, None, None)
-            send(pipe, _msgAsBytes(msg), block=False)
-        if (msgAccumulator := self._msgAccumulatorByEp.pop(ep, Missing)) is not Missing:
-            for msg in msgAccumulator.msgs:
-                _PPMsg('onConnectIpcOut', f'{self._router._name} - sending accumulated {msg}')
-                send(pipe, _msgAsBytes(msg), block=False)
-
     def _onIncomingIpcConnect(self, pipe):
         # in nng ipc we don't know who the remote is until they send a message about themselves, they know who we are
         _PPMsg('onConnectIpcIn', f'{self._router._name} - incoming on {pipe.url}')
@@ -801,13 +813,53 @@ class _NngSocketBundle:
                 _PPMsg('onConnectIpcOut', f'{self._router._name} - sending accumulated {msg}')
                 send(pipe, _msgAsBytes(msg), block=False)
 
+    def _onIncomingTcpConnect(self, pipe):
+        # for a tcp connection we only know the dialer's randomly assigned outgoing address, so we can only setup
+        # routing to that address unless they send a message identifying themselves properly
+        nEp = f'tcp://{pipe.remote_address}'
+        if (pipeByPipeId := self._pipeByPipeIdByEp.get(nEp, Missing)) is Missing:
+            pipeByPipeId = self._pipeByPipeIdByEp[nEp] = {}
+        if pipe.id not in pipeByPipeId:
+            pipeByPipeId[pipe.id] = pipe
+        self._localRemoteEpsByPipeId[pipe.id] = LocalRemoteEps(f'tcp://{pipe.local_address}', nEp)
+        _PPMsg('onConnectTcpIn', f'{self._router._name} - incoming from randomly assigned {nEp}')
+
+    def _onOutGoingTcpConnect(self, pipe):
+        localNEpRandomPort = f'tcp://{pipe.local_address}'
+        nEp = f'tcp://{pipe.remote_address}'
+        _PPMsg('onConnectTcpOut', f'{self._router._name} - connected from {localNEpRandomPort} to {nEp}')
+        if (pipeByPipeId := self._pipeByPipeIdByEp.get(nEp, Missing)) is Missing:
+            pipeByPipeId = self._pipeByPipeIdByEp[nEp] = {}
+        if pipe.id not in pipeByPipeId:
+            pipeByPipeId[pipe.id] = pipe
+        self._localRemoteEpsByPipeId[pipe.id] = LocalRemoteEps(localNEpRandomPort, nEp)
+        if localNEpRandomPort not in self._router._nEps:
+            self._router._nEps.append(localNEpRandomPort)
+        # tell the other end who we are if we are listening on a known network nEp else don't tell them anything
+        if self._ep:
+            msg = Msg(Addr(nEp, None, _ROUTER_REP), _SET_ROUTE_BACK_TO_ME, self._ep)
+            msg.replyAddr = Addr(self._ep or localNEpRandomPort, None, _ROUTER_REP)
+            send(pipe, _msgAsBytes(msg), block=False)
+        if (msgAccumulator := self._msgAccumulatorByEp.pop(nEp, Missing)) is not Missing:
+            for msg in msgAccumulator.msgs:
+                if msg.replyAddr.nEp is None:
+                    msg = msg.clone()
+                    msg.replyAddr = Addr(
+                        self._ep or localNEpRandomPort,
+                        msg.replyAddr.mEp,
+                        msg.replyAddr.rEp
+                    )
+                _PPMsg('onConnectIpcOut', f'{self._router._name} - sending accumulated {msg}')
+                send(pipe, _msgAsBytes(msg), block=False)
+
     def _onDisconnect(self, pipe):
         try:
-            remoteId = self._epByPipeId.pop(pipe.id, Missing)
-            if remoteId:
-                if (pipeByPipeId := self._pipeByPipeIdByEp.get(remoteId, Missing)) is not Missing:
+            ep = self._localRemoteEpsByPipeId.pop(pipe.id, Missing)
+            if ep:
+                if (pipeByPipeId := self._pipeByPipeIdByEp.get(ep, Missing)) is not Missing:
                     pipeByPipeId.pop(pipe.id, None)
-                _PPMsg('onDisconnect', f'{self._router._name} <{remoteId}> - {pipeConnectionType(pipe)} on channel <{pipe.url}>')
+                # OPEN: drop the random port nEp
+                _PPMsg('onDisconnect', f'{self._router._name} <{ep}> - {pipeConnectionType(pipe)} on channel <{pipe.url}>')
             else:
                 _PPMsg('onDisconnect', f'{self._router._name} - {pipeConnectionType(pipe)} on channel {pipe.url}')
         except Exception as ex:
@@ -816,10 +868,10 @@ class _NngSocketBundle:
 
     # ROUTING
 
-    def _mRoute(self, msg, ep):
-        if (pipeByPipeId := self._pipeByPipeIdByEp.get(ep, Missing)) is Missing:
-            if (msgAccumulator := self._msgAccumulatorByEp.get(ep, Missing)) is Missing:
-                msgAccumulator = self._dial(ep, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
+    def _mRoute(self, msg, mEp):
+        if (pipeByPipeId := self._pipeByPipeIdByEp.get(mEp, Missing)) is Missing:
+            if (msgAccumulator := self._msgAccumulatorByEp.get(mEp, Missing)) is Missing:
+                msgAccumulator = self._dial(mEp, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
             msgAccumulator.queueMsg(msg)
         else:
             if msg.replyAddr.mEp is None:
@@ -827,18 +879,46 @@ class _NngSocketBundle:
             pipe = firstValue(pipeByPipeId)
             cosend(pipe, _msgAsBytes(msg))  # we might be able to async send this instead but not sure we gain much
 
-    def _nRoute(self, msg, ep):
-        if (pipeByPipeId := self._pipeByPipeIdByEp.get(ep, Missing)) is Missing:
-            if (msgAccumulator := self._msgAccumulatorByEp.get(ep, Missing)) is Missing:
-                msgAccumulator = self._dial(ep, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
+    def _nRoute(self, msg, nEp):
+        if (pipeByPipeId := self._pipeByPipeIdByEp.get(nEp, Missing)) is Missing:
+            accumulate = True
+        else:
+            pipe = firstValue(pipeByPipeId)
+            if msg.replyAddr.nEp is None:
+                if (eps := self._localRemoteEpsByPipeId.get(pipe.id, Missing)) is Missing:
+                    accumulate = True
+                else:
+                    # assign the repyAddr.nEp to the random port one
+                    msg = msg.clone()
+                    msg.replyAddr = Addr(
+                        self._ep or eps.local,
+                        msg.replyAddr.mEp,
+                        msg.replyAddr.rEp
+                    )
+                    accumulate = False
+            else:
+                accumulate = False
+        if accumulate:
+            if (msgAccumulator := self._msgAccumulatorByEp.get(nEp, Missing)) is Missing:
+                msgAccumulator = self._dial(nEp, _DEFAULT_LOCAL_CONNECTION_TIMESOUT)
             msgAccumulator.queueMsg(msg)
         else:
-            if msg.replyAddr.nEp is None:
-                raise NotYetImplemented('msg.replyAddr.nEp is None')
-            pipe = firstValue(pipeByPipeId)
-            cosend(pipe, _msgAsBytes(msg))  # we might be able to async send this instead but not sure we gain much
+            if (msgAccumulator := self._msgAccumulatorByEp.pop(nEp, Missing)) is not Missing:
+                for accMsg in msgAccumulator.msgs:
+                    _PPMsg('_nRoute', f'{self._router._name} - sending accumulated {accMsg}')
+                    if msg.replyAddr.nEp is None:
+                        # assign the repyAddr.nEp to the random port one
+                        accMsg = msg.clone()
+                        accMsg.replyAddr = Addr(
+                            self._ep or nEp,
+                            accMsg.replyAddr.mEp,
+                            accMsg.replyAddr.rEp
+                        )
+                    cosend(pipe, _msgAsBytes(accMsg))
+            cosend(pipe, _msgAsBytes(msg))      # we might be able to async send this instead but not sure we gain much
 
 
+    # DISPLAY
 
     def __repr__(self):
         return f'SocketBundle<{self._router._name}::{self._ep}>'
@@ -877,7 +957,7 @@ class Directory:
         '_beaconAnnounce',          # UDP multicast address or Missing
         '_beaconListen',            # UDP multicast address or Missing
         '_ensureNetworkWait',       # time to wait before trying to ensure network again
-        '_vnetByHub',               # vnet name by hub mEp or hub nEp
+        '_vnetsByHub',               # vnet name by hub mEp or hub nEp
     )
 
     def __init__(self,
@@ -908,7 +988,7 @@ class Directory:
         self._hubListen = hubListen
         self._hubListener = Missing
         self._hubs = [] if hubs is Missing else hubs
-        self._vnetByHub = {}
+        self._vnetsByHub = {}
         self._gatewayListen = gatewayListen
         self._gatewayListener = Missing
         self._gateways = [] if gateways is Missing else gateways
@@ -965,7 +1045,7 @@ class Directory:
         # share entries with network hubs
         for hub in self._netHubs:
             if hub != self._netListen:
-                if vnets := self._vnetByHub.get(hub, Missing) is Missing:
+                if vnets := self._vnetsByHub.get(hub, Missing) is Missing:
                     await self._conn.send( Msg(Addr(hub, None, _DIRECTORY_REP), Directory._GET_VNETS) )
                 else:
                     # share my entries with net hub
@@ -975,6 +1055,7 @@ class Directory:
 
     async def msgArrived(self, msg):
         self._potentiallyStale.discard(msg.replyAddr)
+        _PPMsg(f'd:{msg.subject}', f'{self._routerName} {msg}')
 
         if msg.subject == VLM.REGISTER_ENTRY:
             addr, service, params, vnets, perms = msg.contents
@@ -1008,10 +1089,11 @@ class Directory:
                 await self._conn.send(msg.reply(self._entries))
 
         elif msg.subject == Directory._GET_VNETS:
-            if msg.isReply:
-                self._vnetByHub[msg.replyAddr.nEp] = msg.contents
-            else:
+            if not msg.isReply:
+                # OPEN: only reply if I am acting as a hub
                 await self._conn.send(msg.reply(self._vnets))
+            else:
+                self._vnetsByHub[msg.replyAddr.nEp] = msg.contents
 
         elif msg.subject == Directory._BAD_ENTRIES:
             _PPMsg(f'd:{msg.subject}', f'{self._routerName} - I was told I send bad entries!!')
@@ -1036,9 +1118,22 @@ class Directory:
                     self._entries.append(entry)
             if not msg.isReply:
                 if msg.replyAddr.nEp:
-                    entries = [e for e in self._entries if _anyIn(e.vnets, self._vnets)]
+                    # just share my entries that are in the vnets the hub is interested in
+                    remotesVnets = self._vnetsByHub.get(msg.replyAddr.nEp, [])
+                    vnetEntries = [e for e in self._entries if _anyIn(e.vnets, self._vnets)]
+                    entries = []
+                    for e in vnetEntries:
+                        if e.addr.nEp is None:
+                            entries.append(Entry(
+                                Addr(msg.toAddr.nEp, e.addr.mEp, e.addr.rEp),
+                                e.service,
+                                e.params,
+                                e.vnets,
+                                e.perms
+                            ))
                 else:
-                    entries = [e for e in self._entries if VLM.LOCAL_VNET in e.vnets]
+                    # share all except my local entries
+                    entries = [e for e in self._entries if e.vnets is not None]
                 await self._conn.send(msg.reply(entries))
 
         else:

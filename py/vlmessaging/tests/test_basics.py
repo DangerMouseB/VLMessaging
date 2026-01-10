@@ -30,6 +30,7 @@ def test_serialise():
     assert msg1._replyId == msg2._replyId
     assert msg1.contents == msg2.contents
     assert msg1.meta == msg2.meta
+    return 'test_serialise passed'
 
 
 class AddOneAgent:
@@ -78,6 +79,7 @@ def test_router_local():
         await co.until(router.hasShutdown)
 
     co.startEventLoopWith(_)
+    return 'test_router_local passed'
 
 
 
@@ -97,6 +99,7 @@ def test_router_ipc():
         await co.until((router1.hasShutdown, router2.hasShutdown))
 
     co.startEventLoopWith(_)
+    return 'test_router_ipc passed'
 
 
 
@@ -120,6 +123,7 @@ def test_router_tcp():
         await co.until((router1.hasShutdown, router2.hasShutdown))
 
     co.startEventLoopWith(_)
+    return 'test_router_tcp passed'
 
 
 
@@ -143,6 +147,7 @@ def test_reduce_connections_to_one():
         await co.until((router1.hasShutdown, router2.hasShutdown))
 
     co.startEventLoopWith(_)
+    return 'test_reduce_connections_to_one passed'
 
 
 
@@ -164,6 +169,7 @@ def test_directory_local():
         await co.until(r1.hasShutdown)
 
     co.startEventLoopWith(_)
+    return 'test_directory_local passed'
 
 
 
@@ -194,19 +200,20 @@ def test_directory_ipc():
         await co.until([r1.hasShutdown, r2.hasShutdown])
 
     co.startEventLoopWith(_)
+    return 'test_directory_ipc passed'
 
 
 
 def test_directory_tcp():
     async def _():
-        r1 = Router(mode=VLM.MACHINE_MODE, name='fred')
+        r1 = Router(mode=VLM.NETWORK_MODE, name='fred')
         d1 = Directory(r1,
             vnets=['test'],
             netListen='tcp://127.0.0.1:30001',
             heartbeatEntriesTimeout=0,
         )
 
-        r2 = Router(mode=VLM.MACHINE_MODE, name='joe')
+        r2 = Router(mode=VLM.NETWORK_MODE, name='joe')
         d2 = Directory(r2,
             vnets=['test'],
             netHubs=['tcp://127.0.0.1:30001'],
@@ -226,6 +233,7 @@ def test_directory_tcp():
         await co.until([r1.hasShutdown, r2.hasShutdown])
 
     co.startEventLoopWith(_)
+    return 'test_directory_tcp passed'
 
 
 def test_directory_tcp_with_beacon_and_gateway():
@@ -268,6 +276,7 @@ def test_directory_tcp_with_beacon_and_gateway():
 
 
     co.startEventLoopWith(_)
+    return 'test_directory_tcp_with_beacon_and_gateway passed'
 
 
 # NEXT
@@ -293,14 +302,14 @@ def test_directory_tcp_with_beacon_and_gateway():
 
 
 def main():
-    test_serialise()
-    test_router_local()
-    test_router_ipc()
-    test_router_tcp()
-    test_reduce_connections_to_one()
-    test_directory_local()
-    test_directory_ipc()
-    # test_directory_tcp()
+    print(test_serialise())
+    print(test_router_local())
+    print(test_router_ipc())
+    print(test_router_tcp())
+    print(test_reduce_connections_to_one())
+    print(test_directory_local())
+    print(test_directory_ipc())
+    print(test_directory_tcp())
     # test_directory_tcp_with_beacon_and_gateway()
     print('passed')
 

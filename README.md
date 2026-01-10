@@ -180,3 +180,35 @@ async def run_example():
 
 co.startEventLoopWith(run_example)
 ```
+
+
+### Add One Via TCP and Resource Discovery ###
+
+```python
+async def run_example():
+    r1 = Router(mode=VLM.NETWORK_MODE)
+    d1 = Directory(r1,
+        vnets=['test'],
+        netListen='tcp://127.0.0.1:30001',
+    )
+
+    r2 = Router(mode=VLM.NETWORK_MODE)
+    d2 = Directory(r2,
+        vnets=['test'],
+        netHubs=['tcp://127.0.0.1:30001'],
+    )
+
+    agent = await AddOneAgent(r1).start('test')
+
+    conn = r2.newConnection()
+    # loop until timeout or the relevant entry appears in d2 (propagated from d1)
+    agentAddr = await wip._waitForSingleEntryAddrOfTypeOrReplyAndExit(conn, 'AddOneAgent', 2_000, 200, errMsg=Missing)
+    reply = await conn.send(Msg(agentAddr, 'ADD_ONE', 41), 2_000)
+    assert reply.contents == 42
+
+    r1.shutdown()
+    r2.shutdown()
+    await co.until([r1.hasShutdown, r2.hasShutdown])
+
+co.startEventLoopWith(run_example)
+```
