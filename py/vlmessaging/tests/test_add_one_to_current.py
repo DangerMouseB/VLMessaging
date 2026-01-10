@@ -28,6 +28,55 @@ from vlmessaging._utils.testing import CountFailures
 from vlmessaging._utils.utils import Timer
 
 
+# PSEUDO MACHINE 1 - ports 30000, 30002, hub on 'ipc:///tmp/hub_1'
+#
+# VLM.NETWORK_MODE
+# router1a_dirKwargs = {
+#     'vnets': ['fitg'],
+#     'hubListen': 'ipc:///tmp/hub_1',
+# }
+#
+# VLM.NETWORK_MODE
+# router1b_dirKwargs = {
+#     'vnets': ['fitg'],
+#     'hubs': ['ipc:///tmp/hub_1'],
+#     'netListen': 'tcp://127.0.0.1:30000',
+#     'netHubs': ['tcp://127.0.0.1:30001'],
+#     'beaconAnnounce' : 'udp://224.1.1.1:30005',
+# }
+#
+# VLM.NETWORK_MODE
+# router1c_dirKwargs = {
+#     'vnets': ['fitg'],
+#     'hubs': ['ipc:///tmp/hub_1'],
+#     'netListen': 'tcp://127.0.0.1:30002',
+#     'gatewayListen': 'ipc:///tmp/gateway_1',
+# }
+#
+# VLM.MACHINE_MODE
+# router1d_dirKwargs = {
+#     'vnets': ['fitg'],
+#     'hubs': ['ipc:///tmp/hub_1'],
+#     'gateways': ['ipc:///tmp/gateway_1'],
+# }
+#
+#
+# PSEUDO MACHINE 2 - port 30001, hub on 'ipc:///tmp/hub_2'
+#
+# VLM.NETWORK_MODE
+# router2a_dirKwargs = {
+#     'vnets': ['fitg', 'othervnet'],
+#     'hubListen': 'ipc:///tmp/hub_2',
+#     'netListen': 'tcp://127.0.0.1:30001',
+#     'beaconListen' : 'udp://224.1.1.1:30005',
+# }
+#
+# VLM.MACHINE_MODE
+# router2b_dirKwargs = {
+#     'vnets': ['fitg'],
+#     'hubs': ['ipc:///tmp/hub_2'],
+# }
+
 
 # **********************************************************************************************************************
 # GetCurrentAgent
