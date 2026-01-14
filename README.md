@@ -26,6 +26,12 @@ used for discovery, and any responsibility providers will re-register with other
 Request / response is built in but other messaging patterns, such as publish / subscribe, guarenteed delivery, 
 intentional load-balancing, queuing etc, are left to be implemented at the application level.
 
+## INSTALLATION ##
+Requires pynng >= 0.8.1, amazon.ion >= 0.13.0
+
+```
+pip install vl-messaging
+```
 
 ## CONCEPTS ##
 
