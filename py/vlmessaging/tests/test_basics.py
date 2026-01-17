@@ -7,6 +7,9 @@
 # License. See the NOTICE file distributed with this work for additional information regarding copyright ownership.
 # **********************************************************************************************************************
 
+# Python imports
+import logging, sys
+
 # vlmessaging imports
 from vlmessaging import Msg, Addr, Router, VLM, Directory, Entry
 from vlmessaging.utils import co, wip, Missing
@@ -15,6 +18,35 @@ from vlmessaging._utils.errors import NotYetImplemented
 
 # local imports
 from vlmessaging._core import _msgFromBytes, _msgAsBytes
+
+_logger = logging.getLogger(__name__)
+
+
+class ListSink(logging.Handler):
+    """Handler that stores log records in a seq."""
+    def __init__(self, msgs, *, level=logging.NOTSET, formatter=None):
+        super().__init__()
+        self.msgs = msgs
+    def emit(self, record):
+        self.msgs.append(self.format(record))
+
+class StreamSink(logging.StreamHandler):
+    def __init__(self, stream=None, *, level=logging.NOTSET, formatter=None):
+        super().__init__(stream)
+        self.setLevel(level)
+        if formatter is not None:
+            self.setFormatter(formatter)
+
+    def setLevel(self, level):
+        """
+        Set the logging level of this handler.  level must be an int or a str.
+        """
+        self.level = logging._checkLevel(level)
+        return self
+
+    def __rrshift__(self, logger):
+        logger.addHandler(self)
+        return self
 
 
 def test_serialise():
@@ -30,7 +62,7 @@ def test_serialise():
     assert msg1._replyId == msg2._replyId
     assert msg1.contents == msg2.contents
     assert msg1.meta == msg2.meta
-    return 'test_serialise passed'
+    _logger.info('test_serialise passed')
 
 
 class AddOneAgent:
@@ -53,8 +85,7 @@ class AddOneAgent:
             )
         )
         reply = await self.conn.send(msg, 500)
-        if reply is Missing:
-            print('No directory')
+        if reply is Missing: _logger.debug('No directory')
         return self
 
 
@@ -79,7 +110,7 @@ def test_router_local():
         await co.until(router.hasShutdown)
 
     co.startEventLoopWith(_)
-    return 'test_router_local passed'
+    _logger.info('test_router_local passed')
 
 
 
@@ -99,7 +130,7 @@ def test_router_ipc():
         await co.until((router1.hasShutdown, router2.hasShutdown))
 
     co.startEventLoopWith(_)
-    return 'test_router_ipc passed'
+    _logger.info('test_router_ipc passed')
 
 
 
@@ -123,14 +154,14 @@ def test_router_tcp():
         await co.until((router1.hasShutdown, router2.hasShutdown))
 
     co.startEventLoopWith(_)
-    return 'test_router_tcp passed'
+    _logger.info('test_router_tcp passed')
 
 
 
 def test_reduce_connections_to_one():
 
     async def msgArrived(msg):
-        print(msg)
+        _logger.debug(msg)
 
     async def _():
         router1 = Router(mode=VLM.MACHINE_MODE, name='fred')
@@ -147,7 +178,7 @@ def test_reduce_connections_to_one():
         await co.until((router1.hasShutdown, router2.hasShutdown))
 
     co.startEventLoopWith(_)
-    return 'test_reduce_connections_to_one passed'
+    _logger.info('test_reduce_connections_to_one passed')
 
 
 
@@ -169,7 +200,7 @@ def test_directory_local():
         await co.until(r1.hasShutdown)
 
     co.startEventLoopWith(_)
-    return 'test_directory_local passed'
+    _logger.info('test_directory_local passed')
 
 
 
@@ -200,7 +231,7 @@ def test_directory_ipc():
         await co.until([r1.hasShutdown, r2.hasShutdown])
 
     co.startEventLoopWith(_)
-    return 'test_directory_ipc passed'
+    _logger.info('test_directory_ipc passed')
 
 
 
@@ -233,7 +264,7 @@ def test_directory_tcp():
         await co.until([r1.hasShutdown, r2.hasShutdown])
 
     co.startEventLoopWith(_)
-    return 'test_directory_tcp passed'
+    _logger.info('test_directory_tcp passed')
 
 
 def test_directory_tcp_with_beacon_and_gateway():
@@ -276,7 +307,7 @@ def test_directory_tcp_with_beacon_and_gateway():
 
 
     co.startEventLoopWith(_)
-    return 'test_directory_tcp_with_beacon_and_gateway passed'
+    _logger.info('test_directory_tcp_with_beacon_and_gateway passed')
 
 
 # NEXT
@@ -302,16 +333,28 @@ def test_directory_tcp_with_beacon_and_gateway():
 
 
 def main():
-    print(test_serialise())
-    print(test_router_local())
-    print(test_router_ipc())
-    print(test_router_tcp())
-    print(test_reduce_connections_to_one())
-    print(test_directory_local())
-    print(test_directory_ipc())
-    print(test_directory_tcp())
+    sink = StreamSink(sys.stdout, formatter=logging.Formatter('%(message)s'))
+    print('vlmessaging._core', logging.DEBUG, logging.getLogger('vlmessaging._core').level, logging.getLogger('vlmessaging._core').getEffectiveLevel())
+    print('vlmessaging', logging.DEBUG, logging.getLogger('vlmessaging').level, logging.getLogger('vlmessaging').getEffectiveLevel())
+    print(logging.DEBUG, logging.getLogger('vlmessaging').level, logging.getLogger('vlmessaging').getEffectiveLevel())
+    # logging.getLogger('vlmessaging._core').setLevel(logging.DEBUG)      # why this works makes no sense to me since vlmessaging is still at WARNING
+    print('vlmessaging._core', logging.DEBUG, logging.getLogger('vlmessaging._core').level, logging.getLogger('vlmessaging._core').getEffectiveLevel())
+    print('vlmessaging', logging.DEBUG, logging.getLogger('vlmessaging').level, logging.getLogger('vlmessaging').getEffectiveLevel())
+    logging.getLogger('vlmessaging') >> sink
+    _logger >> sink
+
+    logging.getLogger('').setLevel(logging.INFO)
+
+    test_serialise()
+    test_router_local()
+    test_router_ipc()
+    test_router_tcp()
+    test_reduce_connections_to_one()
+    test_directory_local()
+    test_directory_ipc()
+    test_directory_tcp()
     # test_directory_tcp_with_beacon_and_gateway()
-    print('passed')
+    _logger.info('passed')
 
 
 if __name__ == '__main__':

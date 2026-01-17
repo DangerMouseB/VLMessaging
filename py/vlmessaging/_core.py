@@ -22,7 +22,9 @@ from vlmessaging._utils.nng_et_al import pipeConnectionType
 from vlmessaging._utils.utils import monotonicTimeMs, coPopFront, pushBack, corecv, Queue, cosend, dial, send
 
 
-_logger = logging.getLogger(__name__)
+_FMT = '%-19s: %s'
+
+_pp = logging.getLogger(__name__)
 random.seed(int.from_bytes(os.urandom(8), 'big'))
 _mEpSeed = itertools.count(os.getpid())    # OPEN: random number instead? any advantages or security concern about using pid?
 
@@ -189,7 +191,7 @@ class Connection:
             else:
                 subjects = [msg.subject] + additional_subjects
             self._futureAndSubjectsByReplyId[msg._msgId] = (fut, subjects)
-            _PPMsg(f'send({timeout})', msg)
+            _pp.debug(_FMT, f'send({timeout})', msg)
             self._router._route(msg)
             try:
                 done, pending = await until(
@@ -198,21 +200,21 @@ class Connection:
                     return_when=asyncio.FIRST_COMPLETED
                 )
                 if self._router._isShuttingDownTask in done:
-                    _PPMsg(f'SHUTDOWN', msg)
+                    _pp.debug(_FMT, f'SHUTDOWN', msg)
                     reply = Missing
                 elif fut in done:
                     reply = fut.result()
                 else:
-                    _PPMsg(f'TIMED OUT', msg)
+                    _pp.debug(_FMT, f'TIMED OUT', msg)
                     reply = Missing
             except asyncio.CancelledError:
-                _PPMsg(f'CANCELLED', msg)
+                _pp.debug(_FMT, f'CANCELLED', msg)
                 reply = Missing
             self._futureAndSubjectsByReplyId.pop(msg._msgId, None)
             return reply
         else:
             # async send
-            _PPMsg('send', msg)
+            _pp.debug(_FMT, 'send', msg)
             self._router._route(msg)
             return None
 
@@ -226,13 +228,13 @@ class Connection:
                     pass
                 else:
                     # we have the reply in time so pass it to the future
-                    _PPMsg(f'deliver reply', msg._msgId)
+                    _pp.debug(_FMT, f'deliver reply', msg._msgId)
                     fut.set_result(msg)
                 return None
 
         if self._msgArrivedFn:
             # no future waiting for this reply so just pass it to the handler
-            _PPMsg(f'deliver msg', msg._msgId)
+            _pp.debug(_FMT, f'deliver msg', msg._msgId)
             try:
                 res = await self._msgArrivedFn(msg)
                 if res is None:
@@ -257,13 +259,13 @@ class Connection:
                             if msg.subject == VLM.DOES_NOT_UNDERSTAND:
                                 handled = True
                             else:
-                                _PPMsg(f'UNHANDLED SUBJECT', msg)
+                                _pp.debug(_FMT, f'UNHANDLED SUBJECT', msg)
                                 await self.send(msg.reply(msg.subject, subject=VLM.DOES_NOT_UNDERSTAND))
                                 handled = True
                         else:
                             raise SyntaxError(f'Unknown instruction "{instruction}".')
                     if not handled:
-                        _PPMsg(f'UNHANDLED SUBJECT', msg)
+                        _pp.debug(_FMT, f'UNHANDLED SUBJECT', msg)
             except ExitMessageHandler as ex:
                 pass
         else:
@@ -272,7 +274,7 @@ class Connection:
                 pass
             else:
                 # no handler so reply it wasn't delivered
-                _PPMsg(f'undeliverable', msg._msgId)
+                _pp.debug(_FMT, f'undeliverable', msg._msgId)
                 await self.send(msg.reply(msg.toAddr, subject=VLM.MSG_NOT_DELIVERED))
 
     def __del__(self):
@@ -466,7 +468,7 @@ class Router:
             else:
                 reply = msg.reply(msg.toAddr, subject=VLM.MSG_NOT_DELIVERED)
                 reply._msgId = -1
-                _PPMsg(f'unroutable', msg._msgId)
+                _pp.debug(_FMT, f'unroutable', msg._msgId)
                 self._route(reply)
 
 
@@ -478,7 +480,7 @@ class Router:
             if mEp is None or mEp in self._mEps:
                 inbox = self._inboxByREp.get(rEp, Missing)
                 if inbox:
-                    _PPMsg(f'route', f'connId: {rEp}, msgId: {msg._msgId}')
+                    _pp.debug(_FMT, f'route', f'connId: {rEp}, msgId: {msg._msgId}')
                     pushBack(inbox, msg)
                 else:
                     if msg.subject == VLM.MSG_NOT_DELIVERED:
@@ -487,7 +489,7 @@ class Router:
                     else:
                         reply = msg.reply(msg.toAddr, subject=VLM.MSG_NOT_DELIVERED)
                         reply._msgId = -1
-                        _PPMsg(f'unroutable', msg._msgId)
+                        _pp.debug(_FMT, f'unroutable', msg._msgId)
                         self._route(reply)
             else:
                 if self._mode is VLM.LOCAL_MODE: raise ValueError(f'{self._mode} router ("{self._name}") cannot route to another router.')
@@ -515,7 +517,7 @@ class Router:
             # process done tasks (always just one?)
             for task in done:
                 details = taskList.pop(task)                                                # take task from the list
-                _PPMsg(f'main', f'{self._name} - {_eventPPNameById[details.type]}')
+                _pp.debug(_FMT, f'main', f'{self._name} - {_eventPPNameById[details.type]}')
 
                 try:
 
@@ -535,13 +537,13 @@ class Router:
                         msg = _msgFromBytes(incoming.bytes)
                         if msg.subject == _SET_ROUTE_BACK_TO_ME:
                             if pipe.id not in sb._localRemoteEpsByPipeId:
-                                _PPMsg('main::SOCK_RECV', f'{self._name} received first message on channel {pipe.url}')
+                                _pp.debug(_FMT, 'main::SOCK_RECV', f'{self._name} received first message on channel {pipe.url}')
                                 otherEp = msg.contents
                                 if (pipeByPipeId := sb._pipeByPipeIdByEp.get(otherEp, Missing)) is Missing:
-                                    _PPMsg('main::SOCK_RECV', f'{self._name} received otherEp {otherEp} for channel {pipe.url}')
+                                    _pp.debug(_FMT, 'main::SOCK_RECV', f'{self._name} received otherEp {otherEp} for channel {pipe.url}')
                                     pipeByPipeId = sb._pipeByPipeIdByEp[otherEp] = {}
                                 else:
-                                    _PPMsg('main::SOCK_RECV', f'{self._name} - WARNING: already connected to {otherEp} - adding additional connection')
+                                    _pp.debug(_FMT, 'main::SOCK_RECV', f'{self._name} - WARNING: already connected to {otherEp} - adding additional connection')
                                     sb._epsWithExcessPipes.add(otherEp)
                                 # overwrite any previous mapping for this pipe.id
                                 sb._localRemoteEpsByPipeId[pipe.id] = LocalRemoteEps(
@@ -551,7 +553,7 @@ class Router:
                                 sb._pipeByPipeIdByEp[otherEp]  = {pipe.id:pipe} | pipeByPipeId  # make this explicit one the first in the dict
 
                         else:
-                            _PPMsg('main::SOCK_RECV', f'{self._name} - routing {msg}')
+                            _pp.debug(_FMT, 'main::SOCK_RECV', f'{self._name} - routing {msg}')
                             if sb._epType == _EP_NETWORK:
                                 if msg.replyAddr.nEp is None:
                                     # assign the repyAddr.nEp to the random port one
@@ -561,7 +563,7 @@ class Router:
                                         msg.replyAddr.rEp
                                     )
                                 if msg.toAddr.nEp not in self._nEps:
-                                    _PPMsg('main::SOCK_RECV', f'{self._name} - ERROR')
+                                    _pp.debug(_FMT, 'main::SOCK_RECV', f'{self._name} - ERROR')
                             self._route(msg)
                         taskList[corecv(sb.sock)] = details                                 # add task to bottom of list
 
@@ -576,7 +578,7 @@ class Router:
                             if m.type == _MSG_ARRIVED and m.args not in self._connectionByREp:
                                 tasksToRemove.append(t)   # drop closed connections
                         for t in tasksToRemove:
-                            # _PPMsg(f'dropping', f'{tasksToRemove[t]}')
+                            # _pp.debug(_FMT, f'dropping', f'{tasksToRemove[t]}')
                             t.cancel('no longer needed')
                             await until(timeout=0)
                             # t.uncancel()    # "in cases when suppressing asyncio.CancelledError is truly desired, it is necessary to also call uncancel()"
@@ -587,20 +589,20 @@ class Router:
                         for rEp, conn in self._connectionByREp.items():
                             if _Details(_MSG_ARRIVED, rEp) not in taskList.values():
                                 taskList[coPopFront(self._inboxByREp[rEp])] = _Details(_MSG_ARRIVED, rEp)
-                                _PPMsg(f'main', f'{self._name} - added MSG_ARRIVED task for connId: {rEp}')
+                                _pp.debug(_FMT, f'main', f'{self._name} - added MSG_ARRIVED task for connId: {rEp}')
 
                         # add any socket tasks that are needed
                         if self._sbRouter and _Details(_SOCK_RECV, self._sbRouter) not in taskList.values():
                             taskList[corecv(self._sbRouter.sock)] = _Details(_SOCK_RECV, self._sbRouter)
-                            _PPMsg(f'main', f'{self._name} - added machine SOCK_RECV task')
+                            _pp.debug(_FMT, f'main', f'{self._name} - added machine SOCK_RECV task')
 
                         if self._sbHub and _Details(_SOCK_RECV, self._sbHub) not in taskList.values():
                             taskList[corecv(self._sbHub.sock)] = _Details(_SOCK_RECV, self._sbHub)
-                            _PPMsg(f'main', f'{self._name} - added hub SOCK_RECV task')
+                            _pp.debug(_FMT, f'main', f'{self._name} - added hub SOCK_RECV task')
 
                         if self._sbNetwork and _Details(_SOCK_RECV, self._sbNetwork) not in taskList.values():
                             taskList[corecv(self._sbNetwork.sock)] = _Details(_SOCK_RECV, self._sbNetwork)
-                            _PPMsg(f'main', f'{self._name} - added network SOCK_RECV task')
+                            _pp.debug(_FMT, f'main', f'{self._name} - added network SOCK_RECV task')
 
                         self._taskListChanged.clear()
                         taskList[taskOnEvent(self._taskListChanged)] = details              # add task to bottom of list
@@ -614,7 +616,7 @@ class Router:
 
                 except BaseException as ex:
                     print(traceback.format_exc())
-                    _PPMsg('!!!!', f'Error processing {_eventPPNameById[details.type]} in router {self._name}: {ex}')
+                    _pp.debug(_FMT, '!!!!', f'Error processing {_eventPPNameById[details.type]} in router {self._name}: {ex}')
                     raise
 
         for t in pending:
@@ -628,7 +630,7 @@ class Router:
         if self._sbGateway: self._sbGateway.close()
         if self._sbNetwork: self._sbNetwork.close()
         self._hasShutdown.set()
-        _PPMsg('shutdown', self._name)
+        _pp.debug(_FMT, 'shutdown', self._name)
 
 
     async def _timerLoop(self):
@@ -672,7 +674,7 @@ class Router:
                     try:
                         await fn()
                     except Exception as ex:
-                        _PPMsg('!!!!', f'Error executing scheduled timer function in router {self._name}: {ex}')
+                        _pp.debug(_FMT, '!!!!', f'Error executing scheduled timer function in router {self._name}: {ex}')
 
         for t in pending:
             t.cancel()
@@ -680,7 +682,7 @@ class Router:
         for t in taskList.keys():
             t.cancel()
             await until(timeout=0)
-        _PPMsg('timerloop shutdown', self._name)
+        _pp.debug(_FMT, 'timerloop shutdown', self._name)
 
 
     # DISPLAY
@@ -748,7 +750,7 @@ class _NngSocketBundle:
                 try:
                     listener = self.sock.listen(sockAddr)
                     self._ep = sockAddr
-                    _PPMsg('listening', f'{self._router._name or str(self._ep)} - {self._ep}')
+                    _pp.debug(_FMT, 'listening', f'{self._router._name or str(self._ep)} - {self._ep}')
                     break
                 except pynng.exceptions.AddressInUse as ex:
                     # OPEN: figure out how to recover from AddressInUse properly rather than just trying a new id - in the
@@ -766,7 +768,7 @@ class _NngSocketBundle:
         if ep in self._msgAccumulatorByEp: raise ValueError(f'Already dialing {ep}.')
         msgAccumulator = self._msgAccumulatorByEp[ep] = _MsgAccumulator(monotonicTimeMs() + timeout)
         self._dialerByEp[ep] = dial(self.sock, ep, block=False)
-        _PPMsg('dialing_router', f'{self._router._name} dialing {ep}')
+        _pp.debug(_FMT, 'dialing_router', f'{self._router._name} dialing {ep}')
         return msgAccumulator
 
 
@@ -792,16 +794,16 @@ class _NngSocketBundle:
                     direction = 'outgoing'
                     self._onOutGoingIpcConnect(pipe)
         except Exception as ex:
-            _PPMsg('onConnect', f'#err {self._router._name} - {direction} via {pipe.url} - {repr(ex)}')
+            _pp.debug(_FMT, 'onConnect', f'#err {self._router._name} - {direction} via {pipe.url} - {repr(ex)}')
 
     def _onIncomingIpcConnect(self, pipe):
         # in nng ipc we don't know who the remote is until they send a message about themselves, they know who we are
-        _PPMsg('onConnectIpcIn', f'{self._router._name} - incoming on {pipe.url}')
+        _pp.debug(_FMT, 'onConnectIpcIn', f'{self._router._name} - incoming on {pipe.url}')
 
     def _onOutGoingIpcConnect(self, pipe):
         # we know who we are connecting to since we dialed them so send our id right away
         ep = pipe.url
-        _PPMsg('onConnectIpcOut', f'{self._router._name} - connected to {ep}')
+        _pp.debug(_FMT, 'onConnectIpcOut', f'{self._router._name} - connected to {ep}')
         if (pipeByPipeId := self._pipeByPipeIdByEp.get(ep, Missing)) is Missing:
             pipeByPipeId = self._pipeByPipeIdByEp[ep] = {}
         if pipe.id not in pipeByPipeId: pipeByPipeId[pipe.id] = pipe
@@ -810,7 +812,7 @@ class _NngSocketBundle:
         send(pipe, _msgAsBytes(msg), block=False)
         if (msgAccumulator := self._msgAccumulatorByEp.pop(ep, Missing)) is not Missing:
             for msg in msgAccumulator.msgs:
-                _PPMsg('onConnectIpcOut', f'{self._router._name} - sending accumulated {msg}')
+                _pp.debug(_FMT, 'onConnectIpcOut', f'{self._router._name} - sending accumulated {msg}')
                 send(pipe, _msgAsBytes(msg), block=False)
 
     def _onIncomingTcpConnect(self, pipe):
@@ -822,12 +824,12 @@ class _NngSocketBundle:
         if pipe.id not in pipeByPipeId:
             pipeByPipeId[pipe.id] = pipe
         self._localRemoteEpsByPipeId[pipe.id] = LocalRemoteEps(f'tcp://{pipe.local_address}', nEp)
-        _PPMsg('onConnectTcpIn', f'{self._router._name} - incoming from randomly assigned {nEp}')
+        _pp.debug(_FMT, 'onConnectTcpIn', f'{self._router._name} - incoming from randomly assigned {nEp}')
 
     def _onOutGoingTcpConnect(self, pipe):
         localNEpRandomPort = f'tcp://{pipe.local_address}'
         nEp = f'tcp://{pipe.remote_address}'
-        _PPMsg('onConnectTcpOut', f'{self._router._name} - connected from {localNEpRandomPort} to {nEp}')
+        _pp.debug(_FMT, 'onConnectTcpOut', f'{self._router._name} - connected from {localNEpRandomPort} to {nEp}')
         if (pipeByPipeId := self._pipeByPipeIdByEp.get(nEp, Missing)) is Missing:
             pipeByPipeId = self._pipeByPipeIdByEp[nEp] = {}
         if pipe.id not in pipeByPipeId:
@@ -849,7 +851,7 @@ class _NngSocketBundle:
                         msg.replyAddr.mEp,
                         msg.replyAddr.rEp
                     )
-                _PPMsg('onConnectIpcOut', f'{self._router._name} - sending accumulated {msg}')
+                _pp.debug(_FMT, 'onConnectIpcOut', f'{self._router._name} - sending accumulated {msg}')
                 send(pipe, _msgAsBytes(msg), block=False)
 
     def _onDisconnect(self, pipe):
@@ -859,11 +861,11 @@ class _NngSocketBundle:
                 if (pipeByPipeId := self._pipeByPipeIdByEp.get(ep, Missing)) is not Missing:
                     pipeByPipeId.pop(pipe.id, None)
                 # OPEN: drop the random port nEp
-                _PPMsg('onDisconnect', f'{self._router._name} <{ep}> - {pipeConnectionType(pipe)} on channel <{pipe.url}>')
+                _pp.debug(_FMT, 'onDisconnect', f'{self._router._name} <{ep}> - {pipeConnectionType(pipe)} on channel <{pipe.url}>')
             else:
-                _PPMsg('onDisconnect', f'{self._router._name} - {pipeConnectionType(pipe)} on channel {pipe.url}')
+                _pp.debug(_FMT, 'onDisconnect', f'{self._router._name} - {pipeConnectionType(pipe)} on channel {pipe.url}')
         except Exception as ex:
-            _PPMsg('onDisconnect', f'#err {self._router._name} - error processing disconnect on channel {pipe.url}: {repr(ex)}')
+            _pp.debug(_FMT, 'onDisconnect', f'#err {self._router._name} - error processing disconnect on channel {pipe.url}: {repr(ex)}')
 
 
     # ROUTING
@@ -905,7 +907,7 @@ class _NngSocketBundle:
         else:
             if (msgAccumulator := self._msgAccumulatorByEp.pop(nEp, Missing)) is not Missing:
                 for accMsg in msgAccumulator.msgs:
-                    _PPMsg('_nRoute', f'{self._router._name} - sending accumulated {accMsg}')
+                    _pp.debug(_FMT, '_nRoute', f'{self._router._name} - sending accumulated {accMsg}')
                     if msg.replyAddr.nEp is None:
                         # assign the repyAddr.nEp to the random port one
                         accMsg = msg.clone()
@@ -1005,7 +1007,7 @@ class Directory:
         try:
             await self._ensureNetworkImpl()
         except Exception as ex:
-            _PPMsg('d:ensureNetwork', f'{self._routerName}: Error ensuring network: {repr(ex)}')
+            _pp.debug(_FMT, 'd:ensureNetwork', f'{self._routerName}: Error ensuring network: {repr(ex)}')
             await self._ensureNetworkImpl()
             raise
         finally:
@@ -1020,7 +1022,7 @@ class Directory:
             try:
                 self._hubListener = self._conn.mEpListen(self._hubListen)
             except Exception as ex:
-                _PPMsg('d:ensureNetwork', f'{self._routerName}: Another router is already listening on {self._hubListen} - {repr(ex)}')
+                _pp.debug(_FMT, 'd:ensureNetwork', f'{self._routerName}: Another router is already listening on {self._hubListen} - {repr(ex)}')
                 
         # share entries with machine hubs
         for hub in self._hubs:
@@ -1033,14 +1035,14 @@ class Directory:
             try:
                 self._gatewayListener = self._conn.mEpListen(self._gatewayListen)
             except Exception as ex:
-                _PPMsg('d:ensureNetwork', f'{self._routerName}: Another router is already listening on {self._gatewayListen} - {repr(ex)}')
+                _pp.debug(_FMT, 'd:ensureNetwork', f'{self._routerName}: Another router is already listening on {self._gatewayListen} - {repr(ex)}')
 
         # network hubs
         if self._netListen and not self._netListener:
             try:
                 self._netListener = self._conn.nEpListen(self._netListen)
             except Exception as ex:
-                _PPMsg('d:ensureNetwork', f'{self._routerName}: Another router is already listening on {self._netListen} - {repr(ex)}')
+                _pp.debug(_FMT, 'd:ensureNetwork', f'{self._routerName}: Another router is already listening on {self._netListen} - {repr(ex)}')
 
         # share entries with network hubs
         for hub in self._netHubs:
@@ -1055,7 +1057,7 @@ class Directory:
 
     async def msgArrived(self, msg):
         self._potentiallyStale.discard(msg.replyAddr)
-        _PPMsg(f'd:{msg.subject}', f'{self._routerName} {msg}')
+        _pp.debug(_FMT, f'd:{msg.subject}', f'{self._routerName} {msg}')
 
         if msg.subject == VLM.REGISTER_ENTRY:
             addr, service, params, vnets, perms = msg.contents
@@ -1096,17 +1098,17 @@ class Directory:
                 self._vnetsByHub[msg.replyAddr.nEp] = msg.contents
 
         elif msg.subject == Directory._BAD_ENTRIES:
-            _PPMsg(f'd:{msg.subject}', f'{self._routerName} - I was told I send bad entries!!')
+            _pp.debug(_FMT, f'd:{msg.subject}', f'{self._routerName} - I was told I send bad entries!!')
         
         elif msg.subject == Directory._SHARE_ENTRIES:
-            _PPMsg(f'd:{msg.subject}', f'{self._routerName} received {len(msg.contents)} entries to share')
+            _pp.debug(_FMT, f'd:{msg.subject}', f'{self._routerName} received {len(msg.contents)} entries to share')
             entries = []
             for seq in msg.contents:
                 try:
-                    _PPMsg(f'd:{msg.subject}', f'{self._routerName} processing shared entry: {seq}')
+                    _pp.debug(_FMT, f'd:{msg.subject}', f'{self._routerName} processing shared entry: {seq}')
                     entries.append(Entry.fromSeq(seq))
                 except Exception as ex:
-                    _PPMsg(f'd:{msg.subject}', f'{self._routerName} - invalid entry received: {repr(ex)}')
+                    _pp.debug(_FMT, f'd:{msg.subject}', f'{self._routerName} - invalid entry received: {repr(ex)}')
                     reply = Msg(msg.replyAddr, Directory._BAD_ENTRIES, None)
                     await self._conn.send(reply)
                     return
@@ -1181,7 +1183,7 @@ def _msgFromBytes(bytes):
         # OPEN: assert stream at end
         return msg
     except Exception as ex:
-        _PPMsg('_msgFromBytes error', repr(ex))
+        _pp.debug(_FMT, '_msgFromBytes error', repr(ex))
         raise
 
 def _toPy(x):
@@ -1200,7 +1202,7 @@ def _toPy(x):
     elif isinstance(x, simpleion.IonPyNull):
         return None
     elif isinstance(x, (str, int, float, bool)):
-        _PPMsg('_toPy', f'WARNING: primitive type "{type(x)}" passed through unchanged.')
+        _pp.debug(_FMT, '_toPy', f'WARNING: primitive type "{type(x)}" passed through unchanged.')
         return x
     else:
         raise ProgrammerError(f'Unknown ION type "{type(x)}".')
