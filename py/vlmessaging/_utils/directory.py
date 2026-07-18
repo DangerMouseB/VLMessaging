@@ -37,7 +37,7 @@ async def _findSingleEntryAddrOfTypeOrMissing(connection, entryType, timeout, er
         if entry.service == entryType: return entry.addr
     return Missing
 
-async def _findEntriesOfTypeOrExit(connection, entryType, timeout, errMsg):
+async def _findEntriesOfTypeOrExit(connection, entryType, timeout, errMsg) -> list[Entry]:
     res = await connection.send(Msg(connection.directoryAddr, VLM.GET_ENTRIES, entryType), timeout)
     if res is Missing: await _replyAndExit(connection, errMsg)
     return [Entry.fromSeq(e) for e in res.contents]
