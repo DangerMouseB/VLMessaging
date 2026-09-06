@@ -1,0 +1,38 @@
+# the package as it is published - pypi/vl-messaging/setup.py, 2026.1.11 - stated here so a checkout of this repo
+# installs the same way: an editable path dependency, `vl-messaging = { path = "<this folder>", editable = true }`
+# under [tool.uv.sources]. flat layout, the package beside this file. README.md and LICENSE here are links to the
+# repo's own, one up - setuptools will not read outside this folder, and the pypi repo links them the same way
+
+[project]
+name = "vl-messaging"
+version = "2026.1.18"
+description = "Light-weight peer-to-peer messaging"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "David Briant", email = "dangermouseb@forwarding.cc" }]
+keywords = ["messaging", "distributed", "parallel"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Science/Research",
+    "Topic :: Utilities",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+    "amazon.ion >= 0.13.0",
+    "pynng >= 0.8.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/DangerMouseB/VLMessaging"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vlmessaging", "vlmessaging._utils", "vlmessaging.utils"]
